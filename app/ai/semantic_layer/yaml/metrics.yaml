@@ -1,0 +1,22 @@
+metrics:
+  - name: total_revenue
+    description: Total revenue from exams
+    sql: SUM(SMM.SMM_VLR)
+    format: currency
+    business_rules: [exclude_cancelled_items, cash_insurance_only, main_unit_branches]
+    
+  - name: exam_count
+    description: Total number of exams performed
+    sql: COUNT(SMM.SMM_NUM)
+    format: integer
+    
+  - name: patient_count
+    description: distinct count of patients
+    sql: COUNT(DISTINCT OSM.OSM_PAC)
+    format: integer
+
+  - name: ticket_average
+    description: Average revenue per patient
+    sql: SUM(SMM.SMM_VLR) * 1.0 / NULLIF(COUNT(DISTINCT OSM.OSM_PAC), 0)
+    format: currency
+    business_rules: [exclude_cancelled_items, cash_insurance_only, main_unit_branches]

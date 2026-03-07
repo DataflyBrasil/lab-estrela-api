@@ -1,0 +1,27 @@
+business_rules:
+  - name: revenue_calculation
+    description: Revenue is calculated based on SMM_VLR which represents the billed amount.
+    
+  - name: active_patient
+    description: A patient is valid if they have at least one order in OSM.
+    
+  # Mandatory Global Filters (Applied to ALL revenue metrics)
+  - name: exclude_cancelled_items
+    description: Exclude cancelled exam items from all revenue calculations
+    filter_type: WHERE
+    condition: (SMM.smm_sfat IS NULL OR SMM.smm_sfat <> 'C')
+    applies_to: [total_revenue, ticket_average]
+    
+  - name: cash_insurance_only
+    description: Include only CASH insurance plans (cnv_caixa_fatura = 'C'), excluding invoiced plans ('F')
+    filter_type: WHERE
+    condition: CNV.cnv_caixa_fatura = 'C'
+    requires_join: CNV
+    applies_to: [total_revenue, ticket_average]
+    
+  - name: main_unit_branches
+    description: Include only main unit branches (str_str_cod starts with '01')
+    filter_type: WHERE
+    condition: STR.str_str_cod LIKE '01%'
+    requires_join: STR
+    applies_to: [total_revenue, ticket_average]

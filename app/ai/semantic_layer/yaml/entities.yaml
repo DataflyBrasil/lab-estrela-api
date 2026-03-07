@@ -1,0 +1,55 @@
+entities:
+  - name: OSM
+    description: Orders / Atendimentos (Central Fact Table)
+    table: OSM
+    primary_key: [OSM_NUM, OSM_SERIE]
+    joins:
+      - target: STR
+        condition: OSM.OSM_STR = STR.STR_COD
+        type: inner
+      - target: MED
+        condition: OSM.OSM_MREQ = MED.MED_COD
+        type: inner
+      - target: CNV
+        condition: OSM.OSM_CNV = CNV.CNV_COD
+        type: inner
+      - target: PAC
+        condition: OSM.OSM_PAC = PAC.PAC_REG
+        type: inner
+    
+  - name: PAC
+    description: Patients / Pacientes
+    table: PAC
+    primary_key: [PAC_REG]
+    
+  - name: SMM
+    description: Exam Items / Solicitação de Exames
+    table: SMM
+    primary_key: [SMM_NUM, SMM_OSM, SMM_OSM_SERIE]
+    joins:
+      - target: OSM
+        condition: SMM.SMM_OSM = OSM.OSM_NUM AND SMM.SMM_OSM_SERIE = OSM.OSM_SERIE
+        type: inner
+      - target: SMK
+        condition: SMM.smm_cod = SMK.SMK_COD
+        type: inner
+        
+  - name: SMK
+    description: Exam Definition / Tabela de Exames
+    table: SMK
+    primary_key: [SMK_COD]
+    
+  - name: STR
+    description: Units & Sectors / Setores
+    table: STR
+    primary_key: [STR_COD]
+    
+  - name: CNV
+    description: Health Plans / Convênios
+    table: CNV
+    primary_key: [CNV_COD]
+    
+  - name: MED
+    description: Doctors / Médicos
+    table: MED
+    primary_key: [MED_COD]

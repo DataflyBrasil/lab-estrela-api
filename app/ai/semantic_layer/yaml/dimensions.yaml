@@ -1,0 +1,28 @@
+dimensions:
+  - name: unit
+    description: Laboratory Unit Name
+    sql: STR.STR_NOME
+    join_path: [OSM, STR]
+    
+  - name: date
+    description: Date of the order
+    sql: CAST(OSM.OSM_DTHR AS DATE)
+    
+  - name: month
+    description: Month of the order (YYYY-MM)
+    sql: FORMAT(OSM.OSM_DTHR, 'yyyy-MM')
+    
+  - name: exam_name
+    description: Name of the exam
+    sql: SMK.SMK_NOME
+    join_path: [SMM, SMK]
+    
+  - name: doctor
+    description: Name of the requesting doctor
+    sql: MED.MED_NOME
+    join_path: [OSM, MED]
+    
+  - name: insurance
+    description: Name of the health plan
+    sql: CNV.CNV_NOME
+    join_path: [OSM, CNV]

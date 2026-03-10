@@ -39,7 +39,7 @@ app = FastAPI(title="Laboratório Estrela API", version="2.0.0")
 # Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://lab-estrela.vercel.app"],
+    allow_origins=["https://labestrelabi.com.br"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

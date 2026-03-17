@@ -139,6 +139,10 @@ def process_sla_operational(df_sla: pd.DataFrame, df_amostras: pd.DataFrame) -> 
                 "faixa_6_10h", "faixa_11_24h", "faixa_gt24h"]
     df_sla[int_cols] = df_sla[int_cols].fillna(0).astype(int)
 
+    # NULL do banco vira NaN (float) no pandas — converte para string vazia
+    df_sla["liberacao_auto"] = df_sla["liberacao_auto"].fillna("").astype(str)
+    df_sla["aparelho"]       = df_sla["aparelho"].fillna("MANUAL").astype(str)
+
     geral_dict:   Dict = {}
     unid_dict:    Dict = {}
     bancada_dict: Dict = {}

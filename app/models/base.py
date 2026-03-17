@@ -289,3 +289,26 @@ class StrategicIndicatorsResponse(BaseModel):
     success: bool
     data: Optional[StrategicIndicatorItem] = None
     error: Optional[str] = None
+
+
+# Técnico — Laudos comparativo (mês atual x mesmo mês ano anterior)
+class LaudosDiaMetrics(BaseModel):
+    quantidade: int
+    valor: float
+    no_prazo: int
+    atrasado: int
+
+class LaudosDiaItem(BaseModel):
+    dia: int
+    atual: LaudosDiaMetrics
+    anterior: LaudosDiaMetrics
+
+class LaudosComparativoData(BaseModel):
+    dias: List[LaudosDiaItem]
+    totais_atual: LaudosDiaMetrics
+    totais_anterior: LaudosDiaMetrics
+
+class LaudosComparativoResponse(BaseModel):
+    success: bool
+    data: Optional[LaudosComparativoData] = None
+    error: Optional[str] = None

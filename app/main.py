@@ -5,9 +5,9 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import logging
 
-from .database import get_db_connection, test_connection, current_db_id
+from .database import get_db_connection, release_connection, test_connection, current_db_id
 from .models.base import (
-    HealthResponse, UnitRevenueResponse, UnitRevenueItem, 
+    HealthResponse, UnitRevenueResponse, UnitRevenueItem,
     SLAResponse, SLAItem, ClientsResponse, ClientsMetrics,
     FinancialResponse, FinancialMetrics,
     DoctorRankingItem, CommercialResponse,
@@ -15,7 +15,8 @@ from .models.base import (
     BudgetResponse,
     PatientIntelligenceResponse,
     PatientDemographics, PatientSocioEconomic, PatientAdvancedAnalytics,
-    StrategicIndicatorsResponse, UnitsResponse
+    StrategicIndicatorsResponse, UnitsResponse,
+    LaudosComparativoResponse, LaudosComparativoData
 )
 from .services.analytics import (
     get_unit_revenue_data, 
@@ -32,6 +33,7 @@ from .services.analytics import (
     process_detailed_finance_python
 )
 from .services.strategic import get_strategic_indicators, get_units
+from .services.cache import analytics_cache
 from .ai.api.router import router as ai_router
 
 app = FastAPI(title="Laboratório Estrela API", version="2.0.0")
@@ -39,7 +41,7 @@ app = FastAPI(title="Laboratório Estrela API", version="2.0.0")
 # Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://labestrelabi.com.br"],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,7 +92,7 @@ def management_indicators(
         
         indicators = get_strategic_indicators(cursor, start_date, end_date, unidade)
         
-        conn.close()
+        release_connection(conn)
         return StrategicIndicatorsResponse(success=True, data=indicators)
     except Exception as e:
         return StrategicIndicatorsResponse(success=False, error=str(e))
@@ -106,7 +108,7 @@ def list_units():
         
         units = get_units(cursor)
         
-        conn.close()
+        release_connection(conn)
         return UnitsResponse(success=True, data=units)
     except Exception as e:
         return UnitsResponse(success=False, error=str(e))
@@ -126,16 +128,15 @@ def get_unit_revenue(
         if not end_date:
             end_date = datetime.now().date()
 
-        # Busca dados brutos
-        # NOTE: get_unit_revenue_data now returns df_smm_rateio and total_mns
-        df_osm, df_mte, df_ipc, df_smm_rateio, total_mns = get_unit_revenue_data(cursor, start_date, end_date)
-        conn.close()
+        # Busca dados brutos alinhados com financeiro estratégico
+        df_faturamento, df_atendimentos = get_unit_revenue_data(cursor, start_date, end_date)
+        release_connection(conn)
 
-        if df_osm.empty:
+        if df_atendimentos.empty:
             return UnitRevenueResponse(success=True, data=[])
-        
+
         # Agrega via Python
-        analytics_result = aggregate_unit_revenue_python(df_osm, df_mte, df_ipc, df_smm_rateio, total_mns)
+        analytics_result = aggregate_unit_revenue_python(df_faturamento, df_atendimentos)
         
         data = [
             UnitRevenueItem(
@@ -166,22 +167,26 @@ def get_exam_sla_convenio(
 
 def handle_exam_sla_request(start_date, end_date, filter_type):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(as_dict=True)
-        
         # Filtros de data
         if not start_date:
             start_date = (datetime.now() - timedelta(days=30)).date()
         if not end_date:
             end_date = datetime.now().date()
 
+        cache_key = f"sla_exame_{filter_type}_{start_date}_{end_date}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+
         # Busca dados brutos
         df = get_exam_sla_data(cursor, start_date, end_date, filter_type)
-        conn.close()
+        release_connection(conn)
 
         if df.empty:
             return SLAResponse(success=True, data=[])
-        
+
         # Agrega via Python
         analytics_result = calculate_exam_sla_python(df)
         
@@ -195,8 +200,10 @@ def handle_exam_sla_request(start_date, end_date, filter_type):
                 prazo_medio_dias=r['prazo_medio_dias']
             ) for r in analytics_result
         ]
-        
-        return SLAResponse(success=True, data=data)
+
+        response = SLAResponse(success=True, data=data)
+        analytics_cache[cache_key] = response
+        return response
 
     except Exception as e:
         return SLAResponse(success=False, error=str(e))
@@ -218,7 +225,7 @@ def get_clients_analytics(
 
         # Busca dados brutos
         df = get_clients_analytics_data(cursor, start_date, end_date)
-        conn.close()
+        release_connection(conn)
 
         if df.empty:
             return ClientsResponse(success=True, data=None)
@@ -237,22 +244,28 @@ def get_financial_strategic_analytics(
     end_date: Optional[date] = None
 ):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(as_dict=True)
-        
         if not start_date:
             start_date = (datetime.now() - timedelta(days=30)).date()
         if not end_date:
             end_date = datetime.now().date()
 
+        cache_key = f"financeiro_estrategico_{start_date}_{end_date}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+
         # Busca dados financeiros
         df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio = get_financial_analytics_data(cursor, start_date, end_date)
-        conn.close()
+        release_connection(conn)
 
         # Processa via Python
         analytics_result = process_financial_analytics_python(df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio)
-        
-        return FinancialResponse(success=True, data=analytics_result)
+
+        response = FinancialResponse(success=True, data=analytics_result)
+        analytics_cache[cache_key] = response
+        return response
 
     except Exception as e:
         return FinancialResponse(success=False, error=str(e))
@@ -273,7 +286,7 @@ def get_commercial_doctors_analytics(
 
         # Busca dados de produção médica
         df_medicos = get_commercial_analytics_data(cursor, start_date, end_date)
-        conn.close()
+        release_connection(conn)
 
         # Processa via Python
         analytics_result = process_commercial_analytics_python(df_medicos)
@@ -299,7 +312,7 @@ def get_detailed_finance_analytics(
 
         # Busca dados detalhados
         mte_totals, df_payments, df_patients = get_detailed_finance_data(cursor, start_date, end_date)
-        conn.close()
+        release_connection(conn)
 
         # Processa via Python
         analytics_result = process_detailed_finance_python(mte_totals, df_payments, df_patients)
@@ -319,30 +332,33 @@ def get_sla_operacional(
     Retorna métricas de atraso de liberação de resultados por unidade, bancada e aparelho.
     """
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(as_dict=True)
-        
         # Default: último mês
         if not start_date:
             start_date = (datetime.now() - timedelta(days=30)).date()
         if not end_date:
             end_date = datetime.now().date()
-        
-        # Import SLA utilities
+
+        cache_key = f"operacional_sla_{start_date}_{end_date}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+
         from .services.sla import get_sla_data, process_sla_operational
-        
-        # Fetch raw data
+
         df_sla, df_amostras = get_sla_data(cursor, str(start_date), str(end_date))
-        conn.close()
-        
-        # Process aggregations
+        release_connection(conn)
+
         analytics_result = process_sla_operational(df_sla, df_amostras)
-        
-        return SLAOperacionalResponse(
+
+        response = SLAOperacionalResponse(
             success=True,
             data=SLAMetrics(**analytics_result)
         )
-        
+        analytics_cache[cache_key] = response
+        return response
+
     except Exception as e:
         return SLAOperacionalResponse(success=False, error=str(e))
 
@@ -364,7 +380,7 @@ def get_budgets(start_date: Optional[str] = Query(None, description="Data inicia
         
         # 1. Buscar dados consolidados
         df_budgets = get_budget_data(cursor, start_date, end_date)
-        conn.close()
+        release_connection(conn)
         
         # 2. Processar métricas
         metrics = process_budget_metrics(df_budgets)
@@ -398,7 +414,7 @@ def get_patient_intelligence(start_date: Optional[str] = Query(None, description
         
         # 1. Fetch Data
         df = get_patient_data(cursor, start_date, end_date)
-        conn.close()
+        release_connection(conn)
         
         # 2. Process Intelligence
         intelligence = process_patient_intelligence(df)
@@ -425,7 +441,7 @@ def get_demographics(start_date: Optional[str] = Query(None, description="Data i
             
         from .services.patient import get_demographics_sql
         data = get_demographics_sql(cursor, start_date, end_date)
-        conn.close()
+        release_connection(conn)
         return data
     except Exception as e:
         print(f"Erro no endpoint demografia: {e}")
@@ -446,7 +462,7 @@ def get_financial(start_date: Optional[str] = Query(None, description="Data inic
             
         from .services.patient import get_financial_sql
         data = get_financial_sql(cursor, start_date, end_date)
-        conn.close()
+        release_connection(conn)
         return data
     except Exception as e:
         print(f"Erro no endpoint financeiro: {e}")
@@ -466,11 +482,49 @@ def get_advanced(start_date: Optional[str] = Query(None, description="Data inici
             
         from .services.patient import get_advanced_sql
         data = get_advanced_sql(cursor, start_date, end_date)
-        conn.close()
+        release_connection(conn)
         return data
     except Exception as e:
         print(f"Erro no endpoint avançado: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tecnico/laudos/comparativo", response_model=LaudosComparativoResponse, tags=["Técnico"])
+def get_laudos_comparativo(
+    ano: Optional[int] = Query(None, description="Ano (padrão: ano corrente)"),
+    mes: Optional[int] = Query(None, description="Mês 1-12 (padrão: mês corrente)"),
+):
+    """
+    Retorna laudos liberados dia a dia no mês informado (ou mês corrente)
+    comparando com o mesmo mês do ano anterior.
+    """
+    from .services.tecnico import get_laudos_comparativo_data, build_laudos_comparativo
+
+    hoje = datetime.now()
+    ano_ref = ano if ano else hoje.year
+    mes_ref = mes if mes else hoje.month
+
+    cache_key = f"laudos_comparativo_{ano_ref}_{mes_ref}"
+    if cache_key in analytics_cache:
+        return analytics_cache[cache_key]
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        df_atual, df_anterior = get_laudos_comparativo_data(cursor, ano_ref, mes_ref)
+        release_connection(conn)
+
+        payload = build_laudos_comparativo(df_atual, df_anterior)
+        response = LaudosComparativoResponse(
+            success=True,
+            data=LaudosComparativoData(**payload),
+        )
+        analytics_cache[cache_key] = response
+        return response
+
+    except Exception as e:
+        return LaudosComparativoResponse(success=False, error=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn

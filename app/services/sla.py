@@ -2,292 +2,236 @@ import pandas as pd
 import numpy as np
 from typing import Tuple, Dict, List
 
+
 def get_sla_data(cursor, start_date: str, end_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Fetches consolidated operational SLA data with a single optimized query.
-    Returns raw data for exam releases and sample retests.
+    Retorna dados de SLA já pré-agregados pelo SQL.
+
+    Otimização principal: a query anterior retornava uma linha por exame individual
+    (potencialmente dezenas de milhares de linhas) e delegava 4 groupby ao Python.
+    Agora o SQL agrega diretamente por (unidade_tecnica, unidade_recepcao, aparelho,
+    liberacao_auto) com SUM(CASE WHEN ...) para cada faixa de atraso.
+    O resultado tem ~30-60 linhas independente do volume do período.
     """
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
-    
-    # Consolidated query for all SLA metrics
+
     query_sla = f"""
-    SELECT 
-        STR.STR_NOME as unidade_tecnica,
-        STR.STR_COD as unidade_tecnica_cod,
-        STR_RECEP.STR_NOME as unidade_recepcao,
-        STR_RECEP.STR_COD as unidade_recepcao_cod,
-        STR_RECEP.STR_STR_COD as str_cod_recepcao,
-        COALESCE(RCL.rcl_aparelho, 'MANUAL') as aparelho,
-        RCL.rcl_ind_lib_Auto as liberacao_auto,
-        SMM.SMM_QT as quantidade,
-        DATEDIFF(minute, SMM.SMM_DT_RESULT, RCL.RCL_DTHR_LIB) as minutos_atraso,
-        RCL.rcl_stat as status_rcl
+    SELECT
+        STR.STR_NOME                         AS unidade_tecnica,
+        STR_RECEP.STR_NOME                   AS unidade_recepcao,
+        COALESCE(RCL.rcl_aparelho, 'MANUAL') AS aparelho,
+        RCL.rcl_ind_lib_Auto                 AS liberacao_auto,
+        SUM(CASE WHEN DATEDIFF(minute, SMM.SMM_DT_RESULT, RCL.RCL_DTHR_LIB) <= 0
+                 THEN SMM.SMM_QT ELSE 0 END) AS no_prazo,
+        SUM(CASE WHEN DATEDIFF(minute, SMM.SMM_DT_RESULT, RCL.RCL_DTHR_LIB) > 0
+                 THEN SMM.SMM_QT ELSE 0 END) AS atrasado,
+        SUM(CASE WHEN DATEDIFF(minute, SMM.SMM_DT_RESULT, RCL.RCL_DTHR_LIB) BETWEEN 1 AND 59
+                 THEN SMM.SMM_QT ELSE 0 END) AS faixa_lt1h,
+        SUM(CASE WHEN DATEDIFF(minute, SMM.SMM_DT_RESULT, RCL.RCL_DTHR_LIB) BETWEEN 60 AND 120
+                 THEN SMM.SMM_QT ELSE 0 END) AS faixa_1_2h,
+        SUM(CASE WHEN DATEDIFF(minute, SMM.SMM_DT_RESULT, RCL.RCL_DTHR_LIB) BETWEEN 121 AND 300
+                 THEN SMM.SMM_QT ELSE 0 END) AS faixa_3_5h,
+        SUM(CASE WHEN DATEDIFF(minute, SMM.SMM_DT_RESULT, RCL.RCL_DTHR_LIB) BETWEEN 301 AND 600
+                 THEN SMM.SMM_QT ELSE 0 END) AS faixa_6_10h,
+        SUM(CASE WHEN DATEDIFF(minute, SMM.SMM_DT_RESULT, RCL.RCL_DTHR_LIB) BETWEEN 601 AND 1440
+                 THEN SMM.SMM_QT ELSE 0 END) AS faixa_11_24h,
+        SUM(CASE WHEN DATEDIFF(minute, SMM.SMM_DT_RESULT, RCL.RCL_DTHR_LIB) > 1440
+                 THEN SMM.SMM_QT ELSE 0 END) AS faixa_gt24h
     FROM RCL WITH(NOLOCK)
-    INNER JOIN SMM WITH(NOLOCK) ON RCL.RCL_SMM = SMM.SMM_NUM 
-        AND RCL.RCL_OSM = SMM.SMM_OSM 
+    INNER JOIN SMM WITH(NOLOCK) ON RCL.RCL_SMM = SMM.SMM_NUM
+        AND RCL.RCL_OSM = SMM.SMM_OSM
         AND RCL.RCL_OSM_SERIE = SMM.SMM_OSM_SERIE
-    INNER JOIN SMK WITH(NOLOCK) ON SMK.smk_Cod = SMM.smm_cod
-    INNER JOIN OSM WITH(NOLOCK) ON OSM.OSM_SERIE = SMM.SMM_OSM_SERIE 
+    INNER JOIN SMK WITH(NOLOCK) ON SMK.smk_Cod = SMM.smm_cod AND SMK.smk_tipo = SMM.smm_tpcod
+    INNER JOIN OSM WITH(NOLOCK) ON OSM.OSM_SERIE = SMM.SMM_OSM_SERIE
         AND OSM.OSM_NUM = SMM.SMM_OSM
     INNER JOIN STR WITH(NOLOCK) ON STR.STR_COD = SMM.SMM_STR
     INNER JOIN STR STR_RECEP WITH(NOLOCK) ON STR_RECEP.STR_COD = OSM.OSM_STR
-    INNER JOIN CTF WITH(NOLOCK) ON CTF.ctf_cod = SMK.smk_ctf
     WHERE RCL.RCL_DTHR_LIB {date_filter}
-    AND RCL.rcl_stat IN ('I', 'E', 'L')
-    AND STR_RECEP.STR_STR_COD LIKE '01%'
+      AND RCL.rcl_stat IN ('I', 'E', 'L')
+      AND STR_RECEP.STR_STR_COD LIKE '01%'
+    GROUP BY
+        STR.STR_NOME,
+        STR_RECEP.STR_NOME,
+        COALESCE(RCL.rcl_aparelho, 'MANUAL'),
+        RCL.rcl_ind_lib_Auto
     """
-    
+
     cursor.execute(query_sla)
-    df_sla = pd.DataFrame(cursor.fetchall())
-    
-    # Query for sample retests (amostras)
+    df_sla = pd.DataFrame(
+        cursor.fetchall(),
+        columns=[
+            "unidade_tecnica", "unidade_recepcao", "aparelho", "liberacao_auto",
+            "no_prazo", "atrasado",
+            "faixa_lt1h", "faixa_1_2h", "faixa_3_5h",
+            "faixa_6_10h", "faixa_11_24h", "faixa_gt24h",
+        ],
+    )
+
     query_amostras = f"""
-    SELECT 
-        B.STR_NOME as unidade_tecnica,
-        SMM.SMM_QT as quantidade,
-        RPE.RPE_IND_NOVA_AMOSTRA as nova_amostra
+    SELECT
+        B.STR_NOME                             AS unidade_tecnica,
+        SUM(SMM.SMM_QT)                        AS quantidade,
+        SUM(CASE WHEN RPE.RPE_IND_NOVA_AMOSTRA = 'S'
+                 THEN SMM.SMM_QT ELSE 0 END)   AS novas_amostras
     FROM RCL WITH(NOLOCK)
-    INNER JOIN SMM WITH(NOLOCK) ON RCL.RCL_OSM_SERIE = SMM.SMM_OSM_SERIE 
-        AND RCL.RCL_OSM = SMM.SMM_OSM 
+    INNER JOIN SMM WITH(NOLOCK) ON RCL.RCL_OSM_SERIE = SMM.SMM_OSM_SERIE
+        AND RCL.RCL_OSM = SMM.SMM_OSM
         AND RCL.RCL_SMM = SMM.SMM_NUM
-    INNER JOIN OSM WITH(NOLOCK) ON RCL.RCL_OSM_SERIE = OSM.OSM_SERIE 
+    INNER JOIN OSM WITH(NOLOCK) ON RCL.RCL_OSM_SERIE = OSM.OSM_SERIE
         AND RCL.RCL_OSM = OSM.OSM_NUM
     INNER JOIN STR B WITH(NOLOCK) ON SMM.SMM_STR = B.STR_COD
-    INNER JOIN RPE WITH(NOLOCK) ON RPE.RPE_SMM_NUM = RCL.RCL_SMM 
-        AND RPE.RPE_OSM_NUM = RCL.RCL_OSM 
+    INNER JOIN RPE WITH(NOLOCK) ON RPE.RPE_SMM_NUM = RCL.RCL_SMM
+        AND RPE.RPE_OSM_NUM = RCL.RCL_OSM
         AND RPE.RPE_OSM_SERIE = RCL.RCL_OSM_SERIE
     WHERE RCL.RCL_DTHR_LIB {date_filter}
+    GROUP BY B.STR_NOME
     """
-    
+
     cursor.execute(query_amostras)
-    df_amostras = pd.DataFrame(cursor.fetchall())
-    
+    df_amostras = pd.DataFrame(
+        cursor.fetchall(),
+        columns=["unidade_tecnica", "quantidade", "novas_amostras"],
+    )
+
     return df_sla, df_amostras
 
-def classify_delay_bucket(minutos: float) -> str:
-    """Classifies delay into time buckets"""
-    if pd.isna(minutos) or minutos <= 0:
-        return None
-    if minutos <= 59:
-        return '< 1h'
-    horas = minutos / 60
-    if horas <= 2:
-        return '1-2h'
-    if horas <= 5:
-        return '3-5h'
-    if horas <= 10:
-        return '6-10h'
-    if horas <= 24:
-        return '11-24h'
-    return '>24h'
 
-def aggregate_sla_faixas(df_group: pd.DataFrame) -> Dict:
-    """Aggregates delay buckets from a grouped DataFrame"""
-    faixas = df_group['faixa'].value_counts().to_dict() if not df_group.empty else {}
+def _faixas_from_row(row) -> Dict:
     return {
-        'menos_1h': faixas.get('< 1h', 0),
-        'entre_1_2h': faixas.get('1-2h', 0),
-        'entre_3_5h': faixas.get('3-5h', 0),
-        'entre_6_10h': faixas.get('6-10h', 0),
-        'entre_11_24h': faixas.get('11-24h', 0),
-        'mais_24h': faixas.get('>24h', 0)
+        "menos_1h":    int(row["faixa_lt1h"]),
+        "entre_1_2h":  int(row["faixa_1_2h"]),
+        "entre_3_5h":  int(row["faixa_3_5h"]),
+        "entre_6_10h": int(row["faixa_6_10h"]),
+        "entre_11_24h":int(row["faixa_11_24h"]),
+        "mais_24h":    int(row["faixa_gt24h"]),
     }
+
+
+def _faixas_add(a: Dict, b: Dict) -> Dict:
+    return {k: a[k] + b[k] for k in a}
+
+
+def _empty_faixas() -> Dict:
+    return {"menos_1h": 0, "entre_1_2h": 0, "entre_3_5h": 0,
+            "entre_6_10h": 0, "entre_11_24h": 0, "mais_24h": 0}
+
+
+def _pct(no_prazo: int, total: int) -> float:
+    return round(no_prazo / total * 100, 2) if total > 0 else 0.0
+
 
 def process_sla_operational(df_sla: pd.DataFrame, df_amostras: pd.DataFrame) -> Dict:
     """
-    Processes raw SLA data into aggregated metrics.
-    Uses pandas for efficient multi-dimensional grouping.
+    Processa dados já pré-agregados pelo SQL (dezenas de linhas, não milhares).
+
+    As 4 views são derivadas acumulando sobre as linhas pré-agrupadas:
+      - geral:            (unidade_recepcao, aparelho, liberacao_auto)
+      - por_unidade:      (unidade_tecnica, unidade_recepcao, aparelho, liberacao_auto)
+      - por_bancada:      (unidade_tecnica, aparelho)
+      - resumo_por_unidade: (unidade_recepcao)
     """
-    
     if df_sla.empty:
-        return {
-            'geral': [],
-            'por_unidade': [],
-            'por_bancada': [],
-            'amostras': []
-        }
-    
-    # Classify delay status and buckets
-    df_sla['status_atraso'] = df_sla['minutos_atraso'].apply(
-        lambda x: 'NO PRAZO' if x <= 0 else 'ATRASADO'
-    )
-    df_sla['faixa'] = df_sla['minutos_atraso'].apply(classify_delay_bucket)
-    
-    # 1. Geral (by reception unit, equipment, and auto-release)
-    geral_grouped = df_sla.groupby(['unidade_recepcao', 'aparelho', 'liberacao_auto', 'status_atraso'])
-    geral_results = []
-    
-    for (unidade, aparelho, lib_auto, status), group in geral_grouped:
-        base_key = (unidade, aparelho, lib_auto)
-        existing = next((item for item in geral_results if 
-                        (item['unidade'], item['aparelho'], item['liberacao_auto']) == base_key), None)
-        
-        if existing is None:
-            # Get the most common technical unit (bancada) for this group
-            bancada_mais_comum = group['unidade_tecnica'].mode()[0] if not group.empty else None
-            
-            existing = {
-                'unidade': unidade,
-                'unidade_recepcao': None,
-                'bancada': bancada_mais_comum,
-                'aparelho': aparelho,
-                'liberacao_auto': lib_auto,
-                'quantidade': 0,
-                'no_prazo': 0,
-                'atrasado': 0,
-                'faixas_atraso': {'menos_1h': 0, 'entre_1_2h': 0, 'entre_3_5h': 0, 
-                                 'entre_6_10h': 0, 'entre_11_24h': 0, 'mais_24h': 0}
+        return {"geral": [], "por_unidade": [], "por_bancada": [], "amostras": []}
+
+    # Normaliza tipos numéricos
+    int_cols = ["no_prazo", "atrasado",
+                "faixa_lt1h", "faixa_1_2h", "faixa_3_5h",
+                "faixa_6_10h", "faixa_11_24h", "faixa_gt24h"]
+    df_sla[int_cols] = df_sla[int_cols].fillna(0).astype(int)
+
+    geral_dict:   Dict = {}
+    unid_dict:    Dict = {}
+    bancada_dict: Dict = {}
+    resumo_dict:  Dict = {}
+
+    for row in df_sla.itertuples(index=False):
+        ut      = row.unidade_tecnica
+        ur      = row.unidade_recepcao
+        ap      = row.aparelho
+        la      = row.liberacao_auto
+        np_     = row.no_prazo
+        at      = row.atrasado
+        qtd     = np_ + at
+        faixas  = _faixas_from_row(row._asdict())
+
+        # --- geral ---
+        k = (ur, ap, la)
+        if k not in geral_dict:
+            geral_dict[k] = {
+                "unidade": ur, "bancada": ut,
+                "aparelho": ap, "liberacao_auto": la,
+                "quantidade": 0, "no_prazo": 0, "atrasado": 0,
+                "faixas_atraso": _empty_faixas(),
             }
-            geral_results.append(existing)
-        
-        qtd = int(group['quantidade'].sum())
-        existing['quantidade'] += qtd
-        
-        if status == 'NO PRAZO':
-            existing['no_prazo'] += qtd
-        else:
-            existing['atrasado'] += qtd
-            # Add delay buckets
-            faixas = aggregate_sla_faixas(group)
-            for key in faixas:
-                existing['faixas_atraso'][key] += faixas[key]
-    
-    # Calculate percentages
-    for item in geral_results:
-        total = item['quantidade']
-        item['percentual_no_prazo'] = round((item['no_prazo'] / total * 100) if total > 0 else 0.0, 2)
-    
-    # 2. Por Unidade (by reception unit)
-    unidade_results = []
-    unidade_grouped = df_sla.groupby(['unidade_recepcao', 'unidade_tecnica', 'aparelho', 'liberacao_auto', 'status_atraso'])
-    
-    for (recep, tecnica, aparelho, lib_auto, status), group in unidade_grouped:
-        base_key = (recep, tecnica, aparelho, lib_auto)
-        existing = next((item for item in unidade_results if 
-                        (item['unidade'], item.get('unidade_recepcao'), item['aparelho'], item['liberacao_auto']) == 
-                        (tecnica, recep, aparelho, lib_auto)), None)
-        
-        if existing is None:
-            existing = {
-                'unidade': tecnica,
-                'unidade_recepcao': recep,
-                'aparelho': aparelho,
-                'liberacao_auto': lib_auto,
-                'quantidade': 0,
-                'no_prazo': 0,
-                'atrasado': 0,
-                'faixas_atraso': {'menos_1h': 0, 'entre_1_2h': 0, 'entre_3_5h': 0, 
-                                 'entre_6_10h': 0, 'entre_11_24h': 0, 'mais_24h': 0}
+        g = geral_dict[k]
+        g["quantidade"] += qtd
+        g["no_prazo"]   += np_
+        g["atrasado"]   += at
+        g["faixas_atraso"] = _faixas_add(g["faixas_atraso"], faixas)
+
+        # --- por_unidade ---
+        k2 = (ut, ur, ap, la)
+        if k2 not in unid_dict:
+            unid_dict[k2] = {
+                "unidade": ut, "unidade_recepcao": ur,
+                "aparelho": ap, "liberacao_auto": la,
+                "quantidade": 0, "no_prazo": 0, "atrasado": 0,
+                "faixas_atraso": _empty_faixas(),
             }
-            unidade_results.append(existing)
-        
-        qtd = int(group['quantidade'].sum())
-        existing['quantidade'] += qtd
-        
-        if status == 'NO PRAZO':
-            existing['no_prazo'] += qtd
-        else:
-            existing['atrasado'] += qtd
-            faixas = aggregate_sla_faixas(group)
-            for key in faixas:
-                existing['faixas_atraso'][key] += faixas[key]
-    
-    for item in unidade_results:
-        total = item['quantidade']
-        item['percentual_no_prazo'] = round((item['no_prazo'] / total * 100) if total > 0 else 0.0, 2)
-    
-    # 3. Por Bancada (by technical unit and equipment only)
-    bancada_results = []
-    bancada_grouped = df_sla.groupby(['unidade_tecnica', 'aparelho', 'status_atraso'])
-    
-    for (unidade, aparelho, status), group in bancada_grouped:
-        base_key = (unidade, aparelho)
-        existing = next((item for item in bancada_results if 
-                        (item['unidade'], item['aparelho']) == base_key), None)
-        
-        if existing is None:
-            existing = {
-                'unidade': unidade,
-                'aparelho': aparelho,
-                'liberacao_auto': None,
-                'quantidade': 0,
-                'no_prazo': 0,
-                'atrasado': 0,
-                'faixas_atraso': {'menos_1h': 0, 'entre_1_2h': 0, 'entre_3_5h': 0, 
-                                 'entre_6_10h': 0, 'entre_11_24h': 0, 'mais_24h': 0}
+        u = unid_dict[k2]
+        u["quantidade"] += qtd
+        u["no_prazo"]   += np_
+        u["atrasado"]   += at
+        u["faixas_atraso"] = _faixas_add(u["faixas_atraso"], faixas)
+
+        # --- bancada ---
+        k3 = (ut, ap)
+        if k3 not in bancada_dict:
+            bancada_dict[k3] = {
+                "unidade": ut, "aparelho": ap, "liberacao_auto": None,
+                "quantidade": 0, "no_prazo": 0, "atrasado": 0,
+                "faixas_atraso": _empty_faixas(),
             }
-            bancada_results.append(existing)
-        
-        qtd = int(group['quantidade'].sum())
-        existing['quantidade'] += qtd
-        
-        if status == 'NO PRAZO':
-            existing['no_prazo'] += qtd
-        else:
-            existing['atrasado'] += qtd
-            faixas = aggregate_sla_faixas(group)
-            for key in faixas:
-                existing['faixas_atraso'][key] += faixas[key]
-    
-    for item in bancada_results:
-        total = item['quantidade']
-        item['percentual_no_prazo'] = round((item['no_prazo'] / total * 100) if total > 0 else 0.0, 2)
-    
-    # 4. Resumo Consolidado por Unidade (SIMPLIFICADO - apenas unidade de recepção)
-    resumo_unidade_results = []
-    resumo_grouped = df_sla.groupby(['unidade_recepcao', 'status_atraso'])
-    
-    for (unidade, status), group in resumo_grouped:
-        existing = next((item for item in resumo_unidade_results if item['unidade'] == unidade), None)
-        
-        if existing is None:
-            existing = {
-                'unidade': unidade,
-                'quantidade': 0,
-                'no_prazo': 0,
-                'atrasado': 0,
-                'faixas_atraso': {'menos_1h': 0, 'entre_1_2h': 0, 'entre_3_5h': 0, 
-                                 'entre_6_10h': 0, 'entre_11_24h': 0, 'mais_24h': 0}
+        b = bancada_dict[k3]
+        b["quantidade"] += qtd
+        b["no_prazo"]   += np_
+        b["atrasado"]   += at
+        b["faixas_atraso"] = _faixas_add(b["faixas_atraso"], faixas)
+
+        # --- resumo ---
+        if ur not in resumo_dict:
+            resumo_dict[ur] = {
+                "unidade": ur,
+                "quantidade": 0, "no_prazo": 0, "atrasado": 0,
+                "faixas_atraso": _empty_faixas(),
             }
-            resumo_unidade_results.append(existing)
-        
-        qtd = int(group['quantidade'].sum())
-        existing['quantidade'] += qtd
-        
-        if status == 'NO PRAZO':
-            existing['no_prazo'] += qtd
-        else:
-            existing['atrasado'] += qtd
-            faixas = aggregate_sla_faixas(group)
-            for key in faixas:
-                existing['faixas_atraso'][key] += faixas[key]
-    
-    for item in resumo_unidade_results:
-        total = item['quantidade']
-        item['percentual_no_prazo'] = round((item['no_prazo'] / total * 100) if total > 0 else 0.0, 2)
-    
-    # Sort by unit name
-    resumo_unidade_results = sorted(resumo_unidade_results, key=lambda x: x['unidade'])
-    
-    # 5. Amostras (sample retests)
+        r = resumo_dict[ur]
+        r["quantidade"] += qtd
+        r["no_prazo"]   += np_
+        r["atrasado"]   += at
+        r["faixas_atraso"] = _faixas_add(r["faixas_atraso"], faixas)
+
+    # Calcula percentual_no_prazo em todos os dicts
+    for d in (*geral_dict.values(), *unid_dict.values(),
+              *bancada_dict.values(), *resumo_dict.values()):
+        d["percentual_no_prazo"] = _pct(d["no_prazo"], d["quantidade"])
+
+    # Amostras — já pré-agregadas pelo SQL
     amostras_results = []
-    if not df_amostras.empty:
-        amostras_grouped = df_amostras.groupby('unidade_tecnica')
-        for unidade, group in amostras_grouped:
-            total_exames = int(group['quantidade'].sum())
-            novas_amostras = int(group[group['nova_amostra'] == 'S']['quantidade'].sum())
-            
-            amostras_results.append({
-                'unidade': unidade,
-                'total_exames': total_exames,
-                'novas_amostras': novas_amostras,
-                'percentual_retrabalho': round((novas_amostras / total_exames * 100) if total_exames > 0 else 0.0, 2)
-            })
-    
+    for row in df_amostras.itertuples(index=False):
+        total = int(row.quantidade)
+        novas = int(row.novas_amostras)
+        amostras_results.append({
+            "unidade": row.unidade_tecnica,
+            "total_exames": total,
+            "novas_amostras": novas,
+            "percentual_retrabalho": round(novas / total * 100, 2) if total > 0 else 0.0,
+        })
+
     return {
-        'geral': geral_results,
-        'por_unidade': unidade_results,
-        'por_bancada': bancada_results,
-        'resumo_por_unidade': resumo_unidade_results,
-        'amostras': amostras_results
+        "geral":               list(geral_dict.values()),
+        "por_unidade":         list(unid_dict.values()),
+        "por_bancada":         list(bancada_dict.values()),
+        "resumo_por_unidade":  sorted(resumo_dict.values(), key=lambda x: x["unidade"]),
+        "amostras":            amostras_results,
     }

@@ -2,150 +2,86 @@ import pandas as pd
 import numpy as np
 
 def get_unit_revenue_data(cursor, start_date, end_date):
-    """Busca dados brutos filtrados por data para processamento em Python."""
-    
+    """
+    Busca dados de faturamento por unidade usando a lógica Oficial do BI.
+    Alinhado com get_financial_analytics_data.
+    Retorna: (df_faturamento, df_atendimentos)
+    """
+
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
-    
-    # 1. Buscar OSM e Unidades
-    query_osm = f"""
-    SELECT 
-        o.osm_num, o.osm_serie, o.osm_cnv, s.str_nome as unidade
-    FROM osm o
-    INNER JOIN str s ON o.osm_str = s.str_cod
-    WHERE o.osm_dthr {date_filter}
-    AND (o.osm_status IS NULL OR o.osm_status <> 'C')
-    """
-    cursor.execute(query_osm)
-    df_osm = pd.DataFrame(cursor.fetchall())
-    
-    if df_osm.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # 2. Buscar MTE (Particular) - Filtrando por data via JOIN com OSM para performance
-    query_mte = f"""
-    SELECT 
-        m.mte_osm, m.mte_osm_serie, 
-        (ISNULL(m.mte_valor, 0)) as valor_liquido -- USANDO BRUTO PARA ALINHAR COM ESTRATEGICO
-    FROM mte m
-    INNER JOIN osm o ON m.mte_osm = o.osm_num AND m.mte_osm_serie = o.osm_serie
-    WHERE o.osm_dthr {date_filter}
-    """
-    cursor.execute(query_mte)
-    df_mte = pd.DataFrame(cursor.fetchall())
-    
-    # 3. Buscar IPC (Convênio) - Filtrando por data via JOIN com OSM
-    query_ipc = f"""
-    SELECT 
-        i.IPC_OSM_NUM, i.IPC_OSM_SERIE, ISNULL(i.IPC_VALOR, 0) as valor
-    FROM IPC i
-    INNER JOIN osm o ON i.IPC_OSM_NUM = o.osm_num AND i.IPC_OSM_SERIE = o.osm_serie
-    WHERE o.osm_dthr {date_filter}
-    AND (i.IPC_STATUS IS NULL OR i.IPC_STATUS <> 'C')
-    """
-    cursor.execute(query_ipc)
-    df_ipc = pd.DataFrame(cursor.fetchall())
-
-    # 4. Buscar SMM (Itens) para Rateio de MNS
-    # Apenas itens de Convênio (CNV <> 1 ou nome <> PARTICULAR)
-    # Assumindo query baseada em OSM para filtrar datas
-    query_smm = f"""
-    SELECT 
-        o.osm_num, s.str_nome as unidade, s.str_cod, sm.smm_vlr
+    # Query consolidada: tipos C e F em um único scan com agregação condicional.
+    # Elimina o round-trip duplicado que antes escanava OSM+SMM+CNV+STR duas vezes.
+    query_faturamento = f"""
+    SELECT
+        s.str_nome as unidade,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'C' THEN sm.smm_vlr ELSE 0 END)                   as bruto_c,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'C' THEN ISNULL(sm.SMM_AJUSTE_VLR, 0) ELSE 0 END) as ajuste_c,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'F' THEN sm.smm_vlr ELSE 0 END)                   as bruto_f
     FROM OSM o
     INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
+    INNER JOIN CNV c  ON o.osm_cnv = c.cnv_cod
+    INNER JOIN STR s  ON o.osm_str = s.str_cod
+    WHERE o.osm_dthr {date_filter}
+    AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
+    AND c.cnv_caixa_fatura IN ('C', 'F')
+    AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
+    GROUP BY s.str_nome
+    """
+    cursor.execute(query_faturamento)
+    df_faturamento = pd.DataFrame(cursor.fetchall())
+
+    query_osm_count = f"""
+    SELECT
+        s.str_nome as unidade,
+        COUNT(DISTINCT o.osm_num) as atendimentos
+    FROM OSM o
     INNER JOIN STR s ON o.osm_str = s.str_cod
-    LEFT JOIN CNV c ON o.osm_cnv = c.cnv_cod
     WHERE o.osm_dthr {date_filter}
     AND (o.osm_status IS NULL OR o.osm_status <> 'C')
-    AND sm.smm_motivo_cancela IS NULL
-    AND (c.cnv_nome NOT LIKE '%PARTIC%' AND c.cnv_nome NOT LIKE '%SUI%')
+    AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
+    GROUP BY s.str_nome
     """
-    cursor.execute(query_smm)
-    df_smm_rateio = pd.DataFrame(cursor.fetchall())
+    cursor.execute(query_osm_count)
+    df_atendimentos = pd.DataFrame(cursor.fetchall())
 
-    # 5. Buscar Total MNS (Global) para o período
-    query_mns_total = f"""
-    SELECT SUM(mns_vlr) as total_mns
-    FROM MNS
-    WHERE MNS_DT {date_filter}
-    AND mns_ind_liberado = 'S'
+    return df_faturamento, df_atendimentos
+
+def aggregate_unit_revenue_python(df_faturamento, df_atendimentos):
     """
-    cursor.execute(query_mns_total)
-    row_mns = cursor.fetchone()
-    total_mns = float(row_mns['total_mns']) if row_mns and row_mns['total_mns'] else 0.0
-    
-    return df_osm, df_mte, df_ipc, df_smm_rateio, total_mns
-
-def aggregate_unit_revenue_python(df_osm, df_mte, df_ipc, df_smm_rateio, total_mns):
-    """Realiza o join e agregação via Pandas com rateio de MNS."""
-    if df_osm.empty:
+    Consolida o faturamento por unidade.
+    Faturamento = (Bruto Caixa + Ajuste Caixa) + Bruto Fatura
+    Recebe df_faturamento com colunas: unidade, bruto_c, ajuste_c, bruto_f.
+    """
+    if df_atendimentos.empty:
         return []
 
-    # Map OSM -> Unidade (Chave Composta)
-    # Map OSM -> Unidade (Chave Composta)
-    # Normalize unit names to avoid duplicates
-    df_osm['unidade'] = df_osm['unidade'].astype(str).str.strip()
-    osm_unit_map = df_osm.set_index(['osm_num', 'osm_serie'])['unidade'].to_dict()
-    
-    # 1. MTE por Unidade (Direto)
-    mte_unit = {}
-    if not df_mte.empty:
-        for _, row in df_mte.iterrows():
-            key = (row['mte_osm'], row['mte_osm_serie'])
-            u = osm_unit_map.get(key, 'DESCONHECIDO')
-            # Using 'valor_liquido' which is now GROSS in SQL
-            mte_unit[u] = mte_unit.get(u, 0.0) + float(row['valor_liquido'])
+    faturamento_map = {}
+    if not df_faturamento.empty:
+        df_fat = df_faturamento.copy()
+        df_fat['unidade'] = df_fat['unidade'].str.strip()
+        # ALINHAMENTO COM VALIDAÇÃO DO USUÁRIO: Apenas Faturamento Caixa BRUTO
+        df_fat['total'] = df_fat['bruto_c'].astype(float)
+        faturamento_map = df_fat.set_index('unidade')['total'].to_dict()
 
-    # 2. IPC por Unidade (Direto)
-    ipc_unit = {}
-    if not df_ipc.empty:
-        for _, row in df_ipc.iterrows():
-            key = (row['IPC_OSM_NUM'], row['IPC_OSM_SERIE'])
-            u = osm_unit_map.get(key, 'DESCONHECIDO')
-            ipc_unit[u] = ipc_unit.get(u, 0.0) + float(row['valor'])
-            
-    # 3. MNS Rateado (Proporcional ao SMM Convênio da Unidade)
-    mns_unit = {}
-    if not df_smm_rateio.empty and total_mns > 0:
-        # Columns: smm_vlr by unidade
-        smm_agg = df_smm_rateio.groupby('unidade')['smm_vlr'].sum()
-        total_smm = smm_agg.sum()
-        
-        if total_smm > 0:
-            for u, val in smm_agg.items():
-                u_str = str(u).strip()
-                share = val / total_smm
-                mns_unit[u_str] = share * total_mns
+    df_ate = df_atendimentos.copy()
+    df_ate['unidade'] = df_ate['unidade'].str.strip()
+    df_ate['faturamento'] = df_ate['unidade'].map(faturamento_map).fillna(0.0).round(2)
+    df_ate['atendimentos'] = df_ate['atendimentos'].astype(int)
 
-    # Consolidar
-    all_units = set(df_osm['unidade'].unique()) | set(mns_unit.keys()) | set(mte_unit.keys())
-    final_data = []
-    
-    osm_counts = df_osm['unidade'].value_counts().to_dict()
-    
-    for u in all_units:
-        u_str = str(u).strip()
-        
-        rev_mte = mte_unit.get(u_str, 0.0)
-        rev_ipc = ipc_unit.get(u_str, 0.0)
-        rev_mns = mns_unit.get(u_str, 0.0)
-        
-        total_rev = rev_mte + rev_ipc + rev_mns
-        
-        final_data.append({
-            'unidade': u_str,
-            'faturamento': total_rev,
-            'atendimentos': int(osm_counts.get(u_str, 0))
-        })
-        
-    return sorted(final_data, key=lambda x: x['faturamento'], reverse=True)
+    return (
+        df_ate[['unidade', 'faturamento', 'atendimentos']]
+        .sort_values('faturamento', ascending=False)
+        .to_dict(orient='records')
+    )
 
 def get_exam_sla_data(cursor, start_date, end_date, filter_type='particular'):
     """Busca dados de exames e prazos para cálculo de SLA."""
     
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
-    # Corrigindo filtro: osm_cnv '1' é particular. Usando TRIM para segurança.
-    cnv_filter = "LTRIM(RTRIM(o.osm_cnv)) = '1'" if filter_type == 'particular' else "LTRIM(RTRIM(o.osm_cnv)) <> '1'"
+    # Comparação direta em CHAR: SQL Server ignora trailing spaces em igualdade,
+    # permitindo uso de índice em osm_cnv (LTRIM/RTRIM bloqueava o índice).
+    cnv_filter = "o.osm_cnv = '1'" if filter_type == 'particular' else "o.osm_cnv <> '1'"
     
     query = f"""
     SELECT 
@@ -168,43 +104,42 @@ def calculate_exam_sla_python(df):
     if df.empty:
         return []
 
-    # Garantir formatos de data
-    df['osm_dthr'] = pd.to_datetime(df['osm_dthr'])
+    df['osm_dthr']      = pd.to_datetime(df['osm_dthr'])
     df['osm_dt_result'] = pd.to_datetime(df['osm_dt_result'])
     df['SMM_DT_RESULT'] = pd.to_datetime(df['SMM_DT_RESULT'])
-    
-    # Calcular data limite
-    def calc_deadline(row):
-        # Prioridade 1: Previsão calculada pelo sistema e salva na OS
-        if pd.notnull(row['osm_dt_result']):
-            return row['osm_dt_result']
-            
-        # Prioridade 2: Cálculo teórico baseado em smk_prazo ou ELD_HORAS
-        base_time = row['osm_dthr']
-        hours = row['SMK_ELD_HORAS'] if pd.notnull(row['SMK_ELD_HORAS']) and row['SMK_ELD_HORAS'] > 0 else 0
-        days = row['smk_prazo'] if pd.notnull(row['smk_prazo']) and row['smk_prazo'] > 0 else 0
-        
-        if hours > 0:
-            return base_time + pd.Timedelta(hours=hours)
-        elif days > 0:
-            return base_time + pd.Timedelta(days=days)
-        else:
-            return base_time + pd.Timedelta(days=3) # Fallback padrão
 
-    df['data_limite'] = df.apply(calc_deadline, axis=1)
-    
-    # Calcular a duração do prazo em dias (para exibição)
+    # Deadline vetorizado com máscaras — substitui df.apply(calc_deadline, axis=1)
+    # Prioridade 1: data prevista já calculada pelo sistema e salva na OS
+    df['data_limite'] = df['osm_dt_result']
+
+    # Prioridade 2: base + horas ELD (onde osm_dt_result é nulo)
+    has_horas = df['data_limite'].isna() & df['SMK_ELD_HORAS'].notna() & (df['SMK_ELD_HORAS'] > 0)
+    df.loc[has_horas, 'data_limite'] = (
+        df.loc[has_horas, 'osm_dthr'] +
+        pd.to_timedelta(df.loc[has_horas, 'SMK_ELD_HORAS'], unit='h')
+    )
+
+    # Prioridade 3: base + dias smk_prazo
+    has_dias = df['data_limite'].isna() & df['smk_prazo'].notna() & (df['smk_prazo'] > 0)
+    df.loc[has_dias, 'data_limite'] = (
+        df.loc[has_dias, 'osm_dthr'] +
+        pd.to_timedelta(df.loc[has_dias, 'smk_prazo'], unit='D')
+    )
+
+    # Prioridade 4: fallback 3 dias
+    mask_default = df['data_limite'].isna()
+    df.loc[mask_default, 'data_limite'] = df.loc[mask_default, 'osm_dthr'] + pd.Timedelta(days=3)
+
+    # Duração do prazo em dias (para exibição)
     df['prazo_dias'] = (df['data_limite'] - df['osm_dthr']).dt.total_seconds() / (24 * 3600)
-    
-    # Verificar se está no prazo
-    def check_on_time(row):
-        if pd.isnull(row['SMM_DT_RESULT']):
-            return np.nan # Ignorar exames sem resultado para o KPI de performance de entrega
-        
-        # Consideramos No Prazo se entregue até o limite (incluindo o mesmo segundo)
-        return 1 if row['SMM_DT_RESULT'] <= row['data_limite'] else 0
 
-    df['no_prazo'] = df.apply(check_on_time, axis=1)
+    # On-time vetorizado — substitui df.apply(check_on_time, axis=1)
+    # Exames sem resultado são excluídos do KPI de entrega (NaN)
+    df['no_prazo'] = np.where(
+        df['SMM_DT_RESULT'].isna(),
+        np.nan,
+        (df['SMM_DT_RESULT'] <= df['data_limite']).astype(float)
+    )
     df_valid = df.dropna(subset=['no_prazo'])
     
     if df_valid.empty:
@@ -219,20 +154,19 @@ def calculate_exam_sla_python(df):
     result.columns = ['unidade', 'no_prazo_count', 'total_exames', 'prazo_medio_dias']
     result['atrasados'] = result['total_exames'] - result['no_prazo_count']
     result['percentual_no_prazo'] = (result['no_prazo_count'] / result['total_exames']) * 100
-    
-    # Converter para tipos nativos do Python
-    final_data = []
-    for _, row in result.iterrows():
-        final_data.append({
-            'unidade': str(row['unidade']).strip(),
-            'percentual_no_prazo': float(row['percentual_no_prazo']),
-            'total_exames': int(row['total_exames']),
-            'no_prazo': int(row['no_prazo_count']),
-            'atrasados': int(row['atrasados']),
-            'prazo_medio_dias': float(row['prazo_medio_dias'])
-        })
-    
-    return sorted(final_data, key=lambda x: x['percentual_no_prazo'], reverse=True)
+
+    # Conversão vetorizada — substitui o iterrows() final
+    result['unidade'] = result['unidade'].str.strip()
+    result = result.rename(columns={'no_prazo_count': 'no_prazo'})
+    result['no_prazo']    = result['no_prazo'].astype(int)
+    result['total_exames'] = result['total_exames'].astype(int)
+    result['atrasados']   = result['atrasados'].astype(int)
+
+    return (
+        result[['unidade', 'percentual_no_prazo', 'total_exames', 'no_prazo', 'atrasados', 'prazo_medio_dias']]
+        .sort_values('percentual_no_prazo', ascending=False)
+        .to_dict(orient='records')
+    )
 
 def get_clients_analytics_data(cursor, start_date, end_date):
     """Busca dados de pacientes que tiveram atendimento no período."""
@@ -324,95 +258,66 @@ def process_clients_analytics_python(df, start_date, end_date):
 
 def get_financial_analytics_data(cursor, start_date, end_date):
     """
-    Busca dados de faturamento (Total Bruto) usando a lógica Oficial do BI do Cliente.
-    Fonte: OSM + SMM + CNV + STR.
-    Filtros: cnv_caixa_fatura='C', str_str_cod='01', smm_sfat <> 'C'.
+    Busca dados de faturamento usando a lógica Oficial do BI do Cliente.
+    As 4 queries originais sobre OSM+SMM+CNV+STR foram consolidadas em 1,
+    eliminando 3 round-trips redundantes. A divisão por tipo (C/F) e por
+    dimensão (convenio, unidade) é feita em Python após o fetch.
     """
-    
-    date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
-    
-    # 1. Faturamento Total, Custo e Ranking por Convênio (Baseado na query Oficial - CAIXA)
-    # Total Bruto: SUM(smm_vlr)
-    # Custo: SUM(SMM_AJUSTE_VLR)
-    query_gross = f"""
-    SELECT 
-        SUM(sm.smm_vlr) as total_bruto,
-        SUM(ISNULL(sm.SMM_AJUSTE_VLR, 0)) as total_custo,
-        c.cnv_nome as convenio
-    FROM OSM o
-    INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
-    INNER JOIN CNV c ON o.osm_cnv = c.cnv_cod
-    INNER JOIN STR s ON o.osm_str = s.str_cod
-    WHERE o.osm_dthr {date_filter}
-    AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
-    AND c.cnv_caixa_fatura = 'C'
-    AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
-    GROUP BY c.cnv_nome
-    """
-    cursor.execute(query_gross)
-    df_gross = pd.DataFrame(cursor.fetchall())
-    
-    # 1.2 Faturamento CONVÊNIO (Fatura 'F')
-    # Adicionando query para pegar o montante de 'F' (Convênios faturados)
-    query_fatura = f"""
-    SELECT 
-        SUM(sm.smm_vlr) as total_fatura
-    FROM OSM o
-    INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
-    INNER JOIN CNV c ON o.osm_cnv = c.cnv_cod
-    INNER JOIN STR s ON o.osm_str = s.str_cod
-    WHERE o.osm_dthr {date_filter}
-    AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
-    AND c.cnv_caixa_fatura = 'F'
-    AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
-    """
-    cursor.execute(query_fatura)
-    row_fatura = cursor.fetchone()
-    valor_fatura_convenio = float(row_fatura['total_fatura']) if row_fatura and row_fatura['total_fatura'] else 0.0
 
-    # 1.3 Faturamento por UNIDADE (Líquido: Bruto + Ajuste) - Apenas 'C' conforme SQL do usuario
-    # Quebrando em Faturado e Custo para calculo de margem
-    query_units = f"""
-    SELECT 
-        s.str_nome as unidade,
-        SUM(sm.smm_vlr) as faturado,
-        SUM(ISNULL(sm.SMM_AJUSTE_VLR, 0)) as custo
+    date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
+
+    # Query consolidada: um único scan agrupa por unidade + convenio + tipo.
+    query_faturamento = f"""
+    SELECT
+        s.str_nome      as unidade,
+        c.cnv_nome      as convenio,
+        c.cnv_caixa_fatura as tipo,
+        SUM(sm.smm_vlr)                   as faturado,
+        SUM(ISNULL(sm.SMM_AJUSTE_VLR, 0)) as ajuste
     FROM OSM o
     INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
-    INNER JOIN CNV c ON o.osm_cnv = c.cnv_cod
-    INNER JOIN STR s ON o.osm_str = s.str_cod
+    INNER JOIN CNV c  ON o.osm_cnv = c.cnv_cod
+    INNER JOIN STR s  ON o.osm_str = s.str_cod
     WHERE o.osm_dthr {date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
-    AND c.cnv_caixa_fatura = 'C'
+    AND c.cnv_caixa_fatura IN ('C', 'F')
     AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
-    GROUP BY s.str_nome
-    ORDER BY faturado DESC
+    GROUP BY s.str_nome, c.cnv_nome, c.cnv_caixa_fatura
     """
-    cursor.execute(query_units)
-    df_units = pd.DataFrame(cursor.fetchall())
-    
-    # 1.4 Faturamento por UNIDADE - CONVÊNIO (Tipo 'F')
-    query_units_convenio = f"""
-    SELECT 
-        s.str_nome as unidade,
-        SUM(sm.smm_vlr) as faturado_convenio
-    FROM OSM o
-    INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
-    INNER JOIN CNV c ON o.osm_cnv = c.cnv_cod
-    INNER JOIN STR s ON o.osm_str = s.str_cod
-    WHERE o.osm_dthr {date_filter}
-    AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
-    AND c.cnv_caixa_fatura = 'F'
-    AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
-    GROUP BY s.str_nome
-    ORDER BY faturado_convenio DESC
-    """
-    cursor.execute(query_units_convenio)
-    df_units_convenio = pd.DataFrame(cursor.fetchall())
-    
-    # 2. Recebimentos e Glosas (BXA) - Mantendo lógica original de caixa
+    cursor.execute(query_faturamento)
+    df_all = pd.DataFrame(cursor.fetchall())
+
+    # Derivar os 4 subconjuntos originais sem queries adicionais
+    if not df_all.empty:
+        df_c = df_all[df_all['tipo'] == 'C']
+        df_f = df_all[df_all['tipo'] == 'F']
+
+        # Ranking por convênio (type C)
+        df_gross = (
+            df_c.groupby('convenio', as_index=False)
+            .agg(total_bruto=('faturado', 'sum'), total_custo=('ajuste', 'sum'))
+        )
+        # Total fatura convênio (type F)
+        valor_fatura_convenio = float(df_f['faturado'].sum())
+        # Breakdown por unidade (type C) para cálculo de margem
+        df_units = (
+            df_c.groupby('unidade', as_index=False)
+            .agg(faturado=('faturado', 'sum'), custo=('ajuste', 'sum'))
+        )
+        # Breakdown por unidade (type F)
+        df_units_convenio = (
+            df_f.groupby('unidade', as_index=False)
+            .agg(faturado_convenio=('faturado', 'sum'))
+        )
+    else:
+        df_gross = pd.DataFrame()
+        valor_fatura_convenio = 0.0
+        df_units = pd.DataFrame()
+        df_units_convenio = pd.DataFrame()
+
+    # Recebimentos e Glosas (BXA) — tabela diferente, query separada mantida
     query_bxa = f"""
-    SELECT 
+    SELECT
         b.BXA_VALOR_RECEB,
         b.BXA_VALOR_GLOSA
     FROM BXA b
@@ -421,12 +326,12 @@ def get_financial_analytics_data(cursor, start_date, end_date):
     """
     cursor.execute(query_bxa)
     df_caixa = pd.DataFrame(cursor.fetchall())
-    
-    # 3. Total de Atendimentos (para Ticket Médio)
+
+    # Total de Atendimentos (para Ticket Médio)
     query_osm_count = f"SELECT COUNT(*) as total FROM osm WHERE osm_dthr {date_filter} AND (osm_status IS NULL OR osm_status <> 'C')"
     cursor.execute(query_osm_count)
     total_atendimentos = cursor.fetchone()['total']
-    
+
     return df_gross, df_caixa, total_atendimentos, valor_fatura_convenio, df_units, df_units_convenio
 
 def process_financial_analytics_python(df_gross, df_caixa, total_atendimentos, valor_fatura_convenio=0.0, df_units=None, df_units_convenio=None):
@@ -442,11 +347,11 @@ def process_financial_analytics_python(df_gross, df_caixa, total_atendimentos, v
         faturado_caixa = float(df_gross['total_bruto'].sum())
         custo_caixa = float(df_gross['total_custo'].sum())
         
-        # Ranking de Convênios
-        df_top_cnv = df_gross.groupby('convenio')['total_bruto'].sum().reset_index()
+        # Ranking de Convênios — df_gross já vem agrupado por convenio, groupby redundante removido
+        df_top_cnv = df_gross[['convenio', 'total_bruto']].copy()
         df_top_cnv['total_bruto'] = df_top_cnv['total_bruto'].astype(float).round(2)
         df_top_cnv = df_top_cnv.sort_values(by='total_bruto', ascending=False).head(10)
-        top_cnv_final = df_top_cnv.rename(columns={'convenio': 'convenio', 'total_bruto': 'faturado'}).to_dict(orient='records')
+        top_cnv_final = df_top_cnv.rename(columns={'total_bruto': 'faturado'}).to_dict(orient='records')
         
     # 1.2 Cálculo do Total Geral (Caixa Líquido + Fatura Bruto)
     # Caixa Líquido = Bruto + Ajustes (que são negativos)
@@ -460,8 +365,12 @@ def process_financial_analytics_python(df_gross, df_caixa, total_atendimentos, v
         df_units['custo'] = df_units['custo'].astype(float)
         df_units['liquido'] = df_units['faturado'] + df_units['custo']
         
-        # Margem = (Liquido / Faturado) * 100
-        df_units['margem'] = df_units.apply(lambda row: (row['liquido'] / row['faturado'] * 100) if row['faturado'] > 0 else 0.0, axis=1)
+        # Margem = (Liquido / Faturado) * 100 — vetorizado, sem apply() row-by-row
+        df_units['margem'] = np.where(
+            df_units['faturado'] > 0,
+            df_units['liquido'] / df_units['faturado'] * 100,
+            0.0
+        )
 
         # Merge Type F data
         if df_units_convenio is not None and not df_units_convenio.empty:

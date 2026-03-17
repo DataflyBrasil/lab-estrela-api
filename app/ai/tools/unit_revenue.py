@@ -42,19 +42,19 @@ class QueryUnitRevenueTool:
             conn = get_db_connection()
             cursor = conn.cursor(as_dict=True)
             
-            df_osm, df_mte, df_ipc, df_smm_rateio, total_mns = get_unit_revenue_data(
+            df_caixa, df_fatura, df_atendimentos = get_unit_revenue_data(
                 cursor, start_date, end_date
             )
             conn.close()
             
-            if df_osm.empty:
+            if df_atendimentos.empty:
                 return {
                     "message": "Nenhum dado encontrado para o período",
                     "period": {"start": str(start_date), "end": str(end_date)},
                     "units": []
                 }
             
-            result = aggregate_unit_revenue_python(df_osm, df_mte, df_ipc, df_smm_rateio, total_mns)
+            result = aggregate_unit_revenue_python(df_caixa, df_fatura, df_atendimentos)
             
             # Formatar para LLM
             formatted_result = {

@@ -1,6 +1,6 @@
 import pandas as pd
 from typing import Tuple, Dict, List, Optional
-from ..models.base import BudgetMetrics, BudgetUnitItem, BudgetUserItem, BudgetSynthetic
+from ..models.base import BudgetMetrics, BudgetUnitItem, BudgetUserItem, BudgetSynthetic, OrcamentoItem, OrcamentoUnidadeItem
 
 def get_budget_data(cursor, start_date: str, end_date: str) -> pd.DataFrame:
     """
@@ -169,3 +169,142 @@ def process_budget_metrics(df: pd.DataFrame) -> BudgetMetrics:
         por_unidade=unidade_metrics,
         por_usuario=usuario_metrics
     )
+
+
+def get_orcamentos_pacientes(cursor, start_date: str, end_date: str) -> List[OrcamentoItem]:
+    """
+    Retorna a lista de orçamentos com dados do paciente vinculado,
+    ordenada da data mais recente para a mais antiga.
+    """
+    date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
+
+    query = f"""
+    SELECT
+        ORP.ORP_NUM                   AS orcamento_num,
+        ORP.ORP_DTHR                  AS data_cadastro,
+        ORP.ORP_STATUS                AS status,
+        ORP.ORP_USR_LOGIN_LANC        AS usuario,
+        STR.STR_NOME                  AS unidade,
+        PAC.PAC_REG                   AS pac_reg,
+        PAC.PAC_NOME                  AS pac_nome,
+        PAC.PAC_FONE                  AS pac_fone,
+        PAC.PAC_NASC                  AS pac_nasc,
+        PAC.PAC_SEXO                  AS pac_sexo,
+        SUM(IOP.IOP_VALOR)            AS valor_total
+    FROM ORP WITH(NOLOCK)
+    INNER JOIN IOP WITH(NOLOCK) ON IOP.IOP_ORP_NUM  = ORP.ORP_NUM
+    INNER JOIN STR WITH(NOLOCK) ON STR.STR_COD       = ORP.ORP_STR_SOLIC
+    INNER JOIN PAC WITH(NOLOCK) ON PAC.PAC_REG        = ORP.ORP_PAC_REG
+    WHERE ORP.ORP_DTHR {date_filter}
+      AND ORP.ORP_STATUS IN ('A', 'P')
+      AND STR.STR_STR_COD LIKE '01%'
+      AND PAC.PAC_NOME NOT LIKE 'teste%'
+    GROUP BY
+        ORP.ORP_NUM,
+        ORP.ORP_DTHR,
+        ORP.ORP_STATUS,
+        ORP.ORP_USR_LOGIN_LANC,
+        STR.STR_NOME,
+        PAC.PAC_REG,
+        PAC.PAC_NOME,
+        PAC.PAC_FONE,
+        PAC.PAC_NASC,
+        PAC.PAC_SEXO
+    ORDER BY ORP.ORP_DTHR DESC
+    """
+
+    cursor.execute(query)
+    columns = [col[0] for col in cursor.description]
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    result = []
+    for r in rows:
+        nasc = r.get('pac_nasc')
+        result.append(OrcamentoItem(
+            orcamento_num=int(r['orcamento_num']),
+            data_cadastro=str(r['data_cadastro'])[:19] if r.get('data_cadastro') else '',
+            status=str(r['status']).strip(),
+            usuario=r.get('usuario'),
+            unidade=str(r['unidade']).strip(),
+            pac_reg=int(r['pac_reg']),
+            pac_nome=str(r['pac_nome']).strip(),
+            pac_fone=str(r['pac_fone']).strip() if r.get('pac_fone') else None,
+            pac_nasc=str(nasc)[:10] if nasc else None,
+            pac_sexo=str(r['pac_sexo']).strip() if r.get('pac_sexo') else None,
+            valor_total=round(float(r['valor_total'] or 0), 2),
+        ))
+
+    return result
+
+
+def get_orcamentos_por_unidade(cursor, unidade: str, start_date: str, end_date: str) -> List[OrcamentoUnidadeItem]:
+    """
+    Retorna os orçamentos de uma unidade específica com todos os detalhes disponíveis,
+    incluindo indicação se o orçamento foi convertido em OS (ORP_OSM_NUM IS NOT NULL).
+    """
+    date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
+    unidade_filter = f"LTRIM(RTRIM(STR.STR_NOME)) = '{unidade.strip()}'"
+
+    query = f"""
+    SELECT
+        ORP.ORP_NUM                   AS orcamento_num,
+        ORP.ORP_DTHR                  AS data_cadastro,
+        ORP.ORP_STATUS                AS status,
+        ORP.ORP_OSM_NUM               AS osm_num,
+        ORP.ORP_USR_LOGIN_LANC        AS usuario,
+        STR.STR_NOME                  AS unidade,
+        PAC.PAC_REG                   AS pac_reg,
+        PAC.PAC_NOME                  AS pac_nome,
+        PAC.PAC_FONE                  AS pac_fone,
+        PAC.PAC_NASC                  AS pac_nasc,
+        PAC.PAC_SEXO                  AS pac_sexo,
+        SUM(IOP.IOP_VALOR)            AS valor_total
+    FROM ORP WITH(NOLOCK)
+    INNER JOIN IOP WITH(NOLOCK) ON IOP.IOP_ORP_NUM  = ORP.ORP_NUM
+    INNER JOIN STR WITH(NOLOCK) ON STR.STR_COD       = ORP.ORP_STR_SOLIC
+    INNER JOIN PAC WITH(NOLOCK) ON PAC.PAC_REG        = ORP.ORP_PAC_REG
+    WHERE ORP.ORP_DTHR {date_filter}
+      AND ORP.ORP_STATUS IN ('A', 'P')
+      AND STR.STR_STR_COD LIKE '01%'
+      AND PAC.PAC_NOME NOT LIKE 'teste%'
+      AND {unidade_filter}
+    GROUP BY
+        ORP.ORP_NUM,
+        ORP.ORP_DTHR,
+        ORP.ORP_STATUS,
+        ORP.ORP_OSM_NUM,
+        ORP.ORP_USR_LOGIN_LANC,
+        STR.STR_NOME,
+        PAC.PAC_REG,
+        PAC.PAC_NOME,
+        PAC.PAC_FONE,
+        PAC.PAC_NASC,
+        PAC.PAC_SEXO
+    ORDER BY ORP.ORP_DTHR DESC
+    """
+
+    cursor.execute(query)
+    columns = [col[0] for col in cursor.description]
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    result = []
+    for r in rows:
+        osm_raw = r.get('osm_num')
+        nasc    = r.get('pac_nasc')
+        result.append(OrcamentoUnidadeItem(
+            orcamento_num=int(r['orcamento_num']),
+            data_cadastro=str(r['data_cadastro'])[:19] if r.get('data_cadastro') else '',
+            status=str(r['status']).strip(),
+            convertido=osm_raw is not None,
+            osm_num=int(osm_raw) if osm_raw is not None else None,
+            usuario=r.get('usuario'),
+            unidade=str(r['unidade']).strip(),
+            pac_reg=int(r['pac_reg']),
+            pac_nome=str(r['pac_nome']).strip(),
+            pac_fone=str(r['pac_fone']).strip() if r.get('pac_fone') else None,
+            pac_nasc=str(nasc)[:10] if nasc else None,
+            pac_sexo=str(r['pac_sexo']).strip() if r.get('pac_sexo') else None,
+            valor_total=round(float(r['valor_total'] or 0), 2),
+        ))
+
+    return result

@@ -9,6 +9,7 @@ class HealthResponse(BaseModel):
 class UnitRevenueItem(BaseModel):
     unidade: str
     faturamento: float
+    faturamento_convenio: float
     atendimentos: int
 
 class UnitRevenueResponse(BaseModel):
@@ -212,6 +213,46 @@ class BudgetResponse(BaseModel):
     data: Optional[BudgetMetrics] = None
     error: Optional[str] = None
 
+class OrcamentoItem(BaseModel):
+    orcamento_num: int
+    data_cadastro: str
+    status: str
+    usuario: Optional[str] = None
+    unidade: str
+    pac_reg: int
+    pac_nome: str
+    pac_fone: Optional[str] = None
+    pac_nasc: Optional[str] = None
+    pac_sexo: Optional[str] = None
+    valor_total: float
+
+class OrcamentosResponse(BaseModel):
+    success: bool
+    data: Optional[List[OrcamentoItem]] = None
+    error: Optional[str] = None
+
+class OrcamentoUnidadeItem(BaseModel):
+    orcamento_num: int
+    data_cadastro: str
+    status: str
+    convertido: bool          # True quando ORP_OSM_NUM IS NOT NULL
+    osm_num: Optional[int] = None  # Número da OS gerada (se convertido)
+    usuario: Optional[str] = None
+    unidade: str
+    pac_reg: int
+    pac_nome: str
+    pac_fone: Optional[str] = None
+    pac_nasc: Optional[str] = None
+    pac_sexo: Optional[str] = None
+    valor_total: float
+
+class OrcamentoUnidadeResponse(BaseModel):
+    success: bool
+    unidade: Optional[str] = None
+    total: int = 0
+    data: Optional[List[OrcamentoUnidadeItem]] = None
+    error: Optional[str] = None
+
 # Patient Intelligence Models
 class PatientDemographics(BaseModel):
     total_pacientes: int
@@ -291,6 +332,87 @@ class StrategicIndicatorsResponse(BaseModel):
     error: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Perfil de Paciente
+# ---------------------------------------------------------------------------
+
+class PacienteListItem(BaseModel):
+    pac_reg: int
+    nome: str
+    nascimento: Optional[str] = None
+    sexo: Optional[str] = None
+    fone: Optional[str] = None
+    ultima_visita: Optional[str] = None
+    total_visitas: int = 0
+    dias_sem_visita: int = 0
+
+class PacienteListResponse(BaseModel):
+    success: bool
+    total: int = 0
+    page: int = 1
+    limit: int = 20
+    data: Optional[List[PacienteListItem]] = None
+    error: Optional[str] = None
+
+class PacienteIdentidade(BaseModel):
+    pac_reg: int
+    nome: str
+    nascimento: Optional[str] = None
+    idade: Optional[int] = None
+    sexo: Optional[str] = None
+    fone: Optional[str] = None
+    data_cadastro: Optional[str] = None
+    tempo_como_paciente_dias: Optional[int] = None
+
+class PacienteClassificacao(BaseModel):
+    categoria: str  # Novo | Recorrente | Fiel | VIP
+    total_visitas: int
+    primeira_visita: Optional[str] = None
+    ultima_visita: Optional[str] = None
+    dias_sem_visita: int
+
+class PacienteResumoFinanceiro(BaseModel):
+    total_gasto: float
+    ticket_medio: float
+    convenio_principal: str
+    valor_particular: float
+    valor_convenio: float
+    percent_particular: float
+
+class PacienteVisita(BaseModel):
+    osm_num: int
+    data: str
+    unidade: str
+    valor: float
+    qtd_exames: int
+
+class PacienteExame(BaseModel):
+    exame: str
+    frequencia: int
+    valor_total: float
+
+class PacienteOrcamento(BaseModel):
+    orcamento_num: int
+    data: str
+    status: str
+    convertido: bool
+    valor_total: float
+    dias_em_aberto: Optional[int] = None
+
+class PacientePerfilData(BaseModel):
+    identidade: PacienteIdentidade
+    classificacao: PacienteClassificacao
+    financeiro: PacienteResumoFinanceiro
+    historico_visitas: List[PacienteVisita]
+    exames_mais_realizados: List[PacienteExame]
+    orcamentos: List[PacienteOrcamento]
+
+class PacientePerfilResponse(BaseModel):
+    success: bool
+    data: Optional[PacientePerfilData] = None
+    error: Optional[str] = None
+
+
 # Técnico — Laudos comparativo (mês atual x mesmo mês ano anterior)
 class LaudosDiaMetrics(BaseModel):
     quantidade: int
@@ -299,7 +421,7 @@ class LaudosDiaMetrics(BaseModel):
     atrasado: int
 
 class LaudosDiaItem(BaseModel):
-    dia: int
+    data: str  # YYYY-MM-DD do período atual
     atual: LaudosDiaMetrics
     anterior: LaudosDiaMetrics
 

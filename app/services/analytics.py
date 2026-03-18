@@ -1,17 +1,18 @@
 import pandas as pd
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from .._db_runner import run_query_new_conn
 
 def get_unit_revenue_data(cursor, start_date, end_date):
     """
     Busca dados de faturamento por unidade usando a lógica Oficial do BI.
-    Alinhado com get_financial_analytics_data.
+    As duas queries (faturamento e contagem de atendimentos) rodam em paralelo,
+    cada uma em conexão própria, reduzindo ~50% o tempo de espera.
     Retorna: (df_faturamento, df_atendimentos)
     """
 
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
 
-    # Query consolidada: tipos C e F em um único scan com agregação condicional.
-    # Elimina o round-trip duplicado que antes escanava OSM+SMM+CNV+STR duas vezes.
     query_faturamento = f"""
     SELECT
         s.str_nome as unidade,
@@ -28,8 +29,6 @@ def get_unit_revenue_data(cursor, start_date, end_date):
     AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
     GROUP BY s.str_nome
     """
-    cursor.execute(query_faturamento)
-    df_faturamento = pd.DataFrame(cursor.fetchall())
 
     query_osm_count = f"""
     SELECT
@@ -42,35 +41,50 @@ def get_unit_revenue_data(cursor, start_date, end_date):
     AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
     GROUP BY s.str_nome
     """
-    cursor.execute(query_osm_count)
-    df_atendimentos = pd.DataFrame(cursor.fetchall())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_fat = pool.submit(run_query_new_conn, query_faturamento)
+        fut_ate = pool.submit(run_query_new_conn, query_osm_count)
+        rows_fat = fut_fat.result()
+        rows_ate = fut_ate.result()
+
+    df_faturamento  = pd.DataFrame(rows_fat)
+    df_atendimentos = pd.DataFrame(rows_ate)
 
     return df_faturamento, df_atendimentos
 
 def aggregate_unit_revenue_python(df_faturamento, df_atendimentos):
     """
     Consolida o faturamento por unidade.
-    Faturamento = (Bruto Caixa + Ajuste Caixa) + Bruto Fatura
+    Faturamento (caixa) = Bruto Caixa (bruto_c)
+    Faturamento convênio = Bruto Fatura (bruto_f)
     Recebe df_faturamento com colunas: unidade, bruto_c, ajuste_c, bruto_f.
     """
     if df_atendimentos.empty:
         return []
 
     faturamento_map = {}
+    faturamento_convenio_map = {}
     if not df_faturamento.empty:
         df_fat = df_faturamento.copy()
         df_fat['unidade'] = df_fat['unidade'].str.strip()
-        # ALINHAMENTO COM VALIDAÇÃO DO USUÁRIO: Apenas Faturamento Caixa BRUTO
-        df_fat['total'] = df_fat['bruto_c'].astype(float)
-        faturamento_map = df_fat.set_index('unidade')['total'].to_dict()
+        df_fat['bruto_c']  = df_fat['bruto_c'].astype(float)
+        df_fat['ajuste_c'] = df_fat['ajuste_c'].astype(float)
+        df_fat['bruto_f']  = df_fat['bruto_f'].astype(float)
+        # Caixa líquido = bruto + ajuste (ajuste é negativo = descontos)
+        # Alinhado com total_geral do /estrategico: (bruto_c + ajuste_c) + bruto_f
+        df_fat['liquido_c'] = df_fat['bruto_c'] + df_fat['ajuste_c']
+        faturamento_map          = df_fat.set_index('unidade')['liquido_c'].to_dict()
+        faturamento_convenio_map = df_fat.set_index('unidade')['bruto_f'].to_dict()
 
     df_ate = df_atendimentos.copy()
     df_ate['unidade'] = df_ate['unidade'].str.strip()
-    df_ate['faturamento'] = df_ate['unidade'].map(faturamento_map).fillna(0.0).round(2)
+    df_ate['faturamento']          = df_ate['unidade'].map(faturamento_map).fillna(0.0).round(2)
+    df_ate['faturamento_convenio'] = df_ate['unidade'].map(faturamento_convenio_map).fillna(0.0).round(2)
     df_ate['atendimentos'] = df_ate['atendimentos'].astype(int)
 
     return (
-        df_ate[['unidade', 'faturamento', 'atendimentos']]
+        df_ate[['unidade', 'faturamento', 'faturamento_convenio', 'atendimentos']]
         .sort_values('faturamento', ascending=False)
         .to_dict(orient='records')
     )

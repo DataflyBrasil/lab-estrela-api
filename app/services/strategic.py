@@ -1,4 +1,5 @@
 from app.database import current_db_id, get_db_connection
+from app._db_runner import run_query_new_conn
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
@@ -30,18 +31,6 @@ def get_units(cursor):
     return cursor.fetchall()
 
 
-# ---------------------------------------------------------------------------
-# Helper para executar uma query em uma conexão dedicada (uso em threads)
-# ---------------------------------------------------------------------------
-def _run_query(query: str) -> list:
-    """Abre uma conexão própria, executa a query e retorna os resultados."""
-    conn = get_db_connection()
-    cur = conn.cursor(as_dict=True)
-    try:
-        cur.execute(query)
-        return cur.fetchall()
-    finally:
-        conn.close()
 
 
 def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: str = None):
@@ -62,7 +51,7 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     # Filtros compartilhados
     # -----------------------------------------------------------------------
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
-    unit_join = "INNER JOIN STR s ON o.osm_str = s.str_cod"
+    unit_join = "INNER JOIN STR s WITH(NOLOCK) ON o.osm_str = s.str_cod"
     unit_where = f"AND (s.str_str_cod LIKE '{unit_prefix}')"
     if unidade:
         unit_where += f" AND LTRIM(RTRIM(s.str_nome)) = '{unidade.strip()}'"
@@ -88,9 +77,9 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
         COUNT(DISTINCT o.osm_usr_login_cad)                                                AS qtd_colaboradores,
         SUM(CASE WHEN sm.smm_vlr = 0 THEN 1 ELSE 0 END)                                   AS cortesias,
         SUM(ISNULL(sm.smm_vlr_desconto, 0))                                                AS total_desconto
-    FROM OSM o
-    INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
-    LEFT JOIN CNV c ON o.osm_cnv = c.cnv_cod
+    FROM OSM o WITH(NOLOCK)
+    INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
+    LEFT JOIN CNV c WITH(NOLOCK) ON o.osm_cnv = c.cnv_cod
     {unit_join}
     WHERE o.osm_dthr {date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
@@ -102,7 +91,7 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     # -----------------------------------------------------------------------
     query_erros = f"""
     SELECT COUNT(*) AS total
-    FROM OSM o
+    FROM OSM o WITH(NOLOCK)
     {unit_join}
     WHERE o.osm_dthr {date_filter}
     AND o.osm_status = 'C'
@@ -114,8 +103,8 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     # -----------------------------------------------------------------------
     query_prev = f"""
     SELECT SUM(sm.smm_vlr) AS total
-    FROM OSM o
-    INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
+    FROM OSM o WITH(NOLOCK)
+    INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
     {unit_join}
     WHERE o.osm_dthr {prev_date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
@@ -123,35 +112,35 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     """
 
     query_new = f"""
-    SELECT 
+    SELECT
         COUNT(DISTINCT p.pac_reg) AS total,
         SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'C') = 'C' THEN 1 ELSE 0 END) AS particular,
         SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'F') = 'F' THEN 1 ELSE 0 END) AS convenio
-    FROM PAC p
+    FROM PAC p WITH(NOLOCK)
     INNER JOIN (
         SELECT osm_pac, MIN(osm_dthr) AS min_dthr, MIN(osm_cnv) AS fst_cnv, MIN(osm_str) AS fst_str
-        FROM OSM
+        FROM OSM WITH(NOLOCK)
         GROUP BY osm_pac
     ) o ON p.pac_reg = o.osm_pac AND o.min_dthr {date_filter}
-    LEFT JOIN CNV c ON o.fst_cnv = c.cnv_cod
-    INNER JOIN STR s ON o.fst_str = s.str_cod
+    LEFT JOIN CNV c WITH(NOLOCK) ON o.fst_cnv = c.cnv_cod
+    INNER JOIN STR s WITH(NOLOCK) ON o.fst_str = s.str_cod
     WHERE p.pac_dreg {date_filter}
     {unit_where}
     """
 
     query_orc = f"""
-    SELECT 
+    SELECT
         COUNT(*) AS total_orcamentos,
         SUM(CASE WHEN r.ORP_OSM_NUM IS NOT NULL THEN 1 ELSE 0 END) AS convertidos
-    FROM ORP r
-    INNER JOIN STR s ON r.ORP_STR_SOLIC = s.str_cod
+    FROM ORP r WITH(NOLOCK)
+    INNER JOIN STR s WITH(NOLOCK) ON r.ORP_STR_SOLIC = s.str_cod
     WHERE r.ORP_DTHR {date_filter}
     {unit_where}
     """
 
     query_rdi = f"""
     SELECT SUM(rdi_valor) AS total_recebido
-    FROM RDI r
+    FROM RDI r WITH(NOLOCK)
     WHERE r.rdi_vcto {date_filter}
     """
 
@@ -162,10 +151,10 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
         SUM(sm.smm_vlr) AS valor_total,
         SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'C') = 'C' THEN sm.smm_vlr ELSE 0 END) AS valor_particular,
         SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'F') = 'F' THEN sm.smm_vlr ELSE 0 END) AS valor_convenio
-    FROM OSM o
-    INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
-    INNER JOIN PSV p ON o.osm_mreq = p.psv_cod
-    LEFT JOIN CNV c ON o.osm_cnv = c.cnv_cod
+    FROM OSM o WITH(NOLOCK)
+    INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
+    INNER JOIN PSV p WITH(NOLOCK) ON o.osm_mreq = p.psv_cod
+    LEFT JOIN CNV c WITH(NOLOCK) ON o.osm_cnv = c.cnv_cod
     {unit_join}
     WHERE o.osm_dthr {date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
@@ -182,9 +171,9 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
         SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'C') = 'C' THEN sm.smm_vlr ELSE 0 END) AS valor_particular,
         SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'F') = 'F' THEN sm.smm_vlr ELSE 0 END) AS valor_convenio,
         MAX(s.str_nome) AS unidade_principal
-    FROM OSM o
-    INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
-    LEFT JOIN CNV c ON o.osm_cnv = c.cnv_cod
+    FROM OSM o WITH(NOLOCK)
+    INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
+    LEFT JOIN CNV c WITH(NOLOCK) ON o.osm_cnv = c.cnv_cod
     {unit_join}
     WHERE o.osm_dthr {date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
@@ -194,18 +183,15 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     """
 
     # -----------------------------------------------------------------------
-    # EXECUÇÃO: super-query e erros sequencialmente no cursor existente,
-    #           demais queries em paralelo cada uma com conexão própria.
+    # EXECUÇÃO: super-query no cursor existente; todas as demais (incluindo
+    # erros) em paralelo com conexões próprias — elimina 1 round-trip serial.
     # -----------------------------------------------------------------------
-    logger.info("Executando super-query e erros...")
+    logger.info("Executando super-query...")
     cursor.execute(query_super)
     res_super = cursor.fetchone()
 
-    cursor.execute(query_erros)
-    erros_fechamento = cursor.fetchone()['total'] or 0
-
-    # Paralelo ---------------------------------------------------------------
     parallel_queries = {
+        "erros": query_erros,
         "prev":  query_prev,
         "new":   query_new,
         "orc":   query_orc,
@@ -215,12 +201,15 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     }
     results = {}
     logger.info("Executando queries paralelas...")
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {pool.submit(_run_query, q): key for key, q in parallel_queries.items()}
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        futures = {pool.submit(run_query_new_conn, q): key for key, q in parallel_queries.items()}
         for future in as_completed(futures):
             key = futures[future]
             results[key] = future.result()
     logger.info("Queries paralelas concluídas.")
+
+    erros_row = results["erros"][0] if results["erros"] else {}
+    erros_fechamento = erros_row.get('total') or 0
 
     # -----------------------------------------------------------------------
     # Pós-processamento – super-query

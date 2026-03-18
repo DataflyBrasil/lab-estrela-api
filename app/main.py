@@ -12,11 +12,15 @@ from .models.base import (
     FinancialResponse, FinancialMetrics,
     DoctorRankingItem, CommercialResponse,
     DetailedResponse, SLAMetrics, SLAOperacionalResponse,
-    BudgetResponse,
+    BudgetResponse, OrcamentosResponse, OrcamentoUnidadeResponse,
     PatientIntelligenceResponse,
     PatientDemographics, PatientSocioEconomic, PatientAdvancedAnalytics,
     StrategicIndicatorsResponse, UnitsResponse,
-    LaudosComparativoResponse, LaudosComparativoData
+    LaudosComparativoResponse, LaudosComparativoData,
+    PacienteListResponse, PacienteListItem,
+    PacientePerfilResponse, PacientePerfilData,
+    PacienteIdentidade, PacienteClassificacao, PacienteResumoFinanceiro,
+    PacienteVisita, PacienteExame, PacienteOrcamento,
 )
 from .services.analytics import (
     get_unit_revenue_data, 
@@ -41,7 +45,7 @@ app = FastAPI(title="Laboratório Estrela API", version="2.0.0")
 # Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
-    # allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    # allow_origins=["http://localhost:3000", "http://localhost:3001", "*"],
     allow_origins=["https://labestrelabi.com.br", "https://app.labestrelabi.com.br"],
     allow_credentials=True,
     allow_methods=["*"],
@@ -120,34 +124,38 @@ def get_unit_revenue(
     end_date: Optional[date] = None
 ):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(as_dict=True)
-        
-        # Filtros de data
         if not start_date:
             start_date = (datetime.now() - timedelta(days=14)).date()
         if not end_date:
             end_date = datetime.now().date()
 
-        # Busca dados brutos alinhados com financeiro estratégico
+        cache_key = f"unit_revenue_{start_date}_{end_date}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        # Queries rodam em paralelo internamente (ver analytics.py)
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
         df_faturamento, df_atendimentos = get_unit_revenue_data(cursor, start_date, end_date)
         release_connection(conn)
 
         if df_atendimentos.empty:
             return UnitRevenueResponse(success=True, data=[])
 
-        # Agrega via Python
         analytics_result = aggregate_unit_revenue_python(df_faturamento, df_atendimentos)
-        
+
         data = [
             UnitRevenueItem(
                 unidade=str(r['unidade']).strip(),
                 faturamento=float(r['faturamento']),
+                faturamento_convenio=float(r['faturamento_convenio']),
                 atendimentos=int(r['atendimentos'])
             ) for r in analytics_result
         ]
-        
-        return UnitRevenueResponse(success=True, data=data)
+
+        response = UnitRevenueResponse(success=True, data=data)
+        analytics_cache[cache_key] = response
+        return response
 
     except Exception as e:
         return UnitRevenueResponse(success=False, error=str(e))
@@ -394,6 +402,69 @@ def get_budgets(start_date: Optional[str] = Query(None, description="Data inicia
         print(f"Erro no endpoint de orçamentos: {e}")
         return {"success": False, "error": str(e)}
 
+@app.get("/orcamentos", response_model=OrcamentosResponse, tags=["Comercial"])
+def get_orcamentos_pacientes(
+    start_date: Optional[date] = Query(None, description="Data inicial (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="Data final (YYYY-MM-DD)"),
+):
+    """
+    Retorna a lista de orçamentos do período com os dados de cada paciente.
+    """
+    try:
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=30)).date()
+        if not end_date:
+            end_date = datetime.now().date()
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        from .services.budget import get_orcamentos_pacientes as _get_orcamentos
+        items = _get_orcamentos(cursor, str(start_date), str(end_date))
+        release_connection(conn)
+
+        return OrcamentosResponse(success=True, data=items)
+
+    except Exception as e:
+        print(f"Erro no endpoint /orcamentos: {e}")
+        return OrcamentosResponse(success=False, error=str(e))
+
+
+@app.get("/orcamentos/unidade", response_model=OrcamentoUnidadeResponse, tags=["Comercial"])
+def get_orcamentos_por_unidade(
+    unidade: str = Query(..., description="Nome exato da unidade"),
+    start_date: Optional[date] = Query(None, description="Data inicial (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="Data final (YYYY-MM-DD)"),
+):
+    """
+    Retorna os orçamentos emitidos para uma unidade específica no período,
+    com dados completos do paciente e indicação se o orçamento foi convertido em OS.
+    """
+    try:
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=30)).date()
+        if not end_date:
+            end_date = datetime.now().date()
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        from .services.budget import get_orcamentos_por_unidade as _get_orcamentos_unidade
+        items = _get_orcamentos_unidade(cursor, unidade, str(start_date), str(end_date))
+        release_connection(conn)
+
+        return OrcamentoUnidadeResponse(
+            success=True,
+            unidade=unidade,
+            total=len(items),
+            data=items,
+        )
+
+    except Exception as e:
+        print(f"Erro no endpoint /orcamentos/unidade: {e}")
+        return OrcamentoUnidadeResponse(success=False, error=str(e))
+
+
 @app.get("/inteligencia/pacientes", response_model=PatientIntelligenceResponse)
 def get_patient_intelligence(start_date: Optional[str] = Query(None, description="Data inicial (YYYY-MM-DD)"),
                              end_date: Optional[str] = Query(None, description="Data final (YYYY-MM-DD)")):
@@ -491,20 +562,36 @@ def get_advanced(start_date: Optional[str] = Query(None, description="Data inici
 
 @app.get("/tecnico/laudos/comparativo", response_model=LaudosComparativoResponse, tags=["Técnico"])
 def get_laudos_comparativo(
-    ano: Optional[int] = Query(None, description="Ano (padrão: ano corrente)"),
-    mes: Optional[int] = Query(None, description="Mês 1-12 (padrão: mês corrente)"),
+    start_date: Optional[date] = Query(None, description="Data inicial (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="Data final (YYYY-MM-DD)"),
+    ano: Optional[int] = Query(None, description="Ano (compatibilidade legada com frontend)"),
+    mes: Optional[int] = Query(None, description="Mês (compatibilidade legada com frontend)"),
 ):
     """
-    Retorna laudos liberados dia a dia no mês informado (ou mês corrente)
-    comparando com o mesmo mês do ano anterior.
+    Retorna laudos liberados dia a dia no período informado,
+    comparando com o mesmo período do ano anterior.
+    Aceita start_date/end_date ou ano/mes (range completo do mês).
     """
+    import calendar
     from .services.tecnico import get_laudos_comparativo_data, build_laudos_comparativo
 
     hoje = datetime.now()
-    ano_ref = ano if ano else hoje.year
-    mes_ref = mes if mes else hoje.month
 
-    cache_key = f"laudos_comparativo_{ano_ref}_{mes_ref}"
+    # Compatibilidade retroativa: ano/mes → primeiro e último dia do mês
+    if ano and mes and not start_date and not end_date:
+        last_day = calendar.monthrange(ano, mes)[1]
+        start_date = date(ano, mes, 1)
+        end_date = date(ano, mes, last_day)
+
+    if not start_date:
+        start_date = hoje.replace(day=1).date()
+    if not end_date:
+        end_date = hoje.date()
+
+    start_str = str(start_date)
+    end_str   = str(end_date)
+
+    cache_key = f"laudos_comparativo_{start_str}_{end_str}"
     if cache_key in analytics_cache:
         return analytics_cache[cache_key]
 
@@ -512,7 +599,7 @@ def get_laudos_comparativo(
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        df_atual, df_anterior = get_laudos_comparativo_data(cursor, ano_ref, mes_ref)
+        df_atual, df_anterior = get_laudos_comparativo_data(cursor, start_str, end_str)
         release_connection(conn)
 
         payload = build_laudos_comparativo(df_atual, df_anterior)
@@ -525,6 +612,58 @@ def get_laudos_comparativo(
 
     except Exception as e:
         return LaudosComparativoResponse(success=False, error=str(e))
+
+
+@app.get("/pacientes/busca", response_model=PacienteListResponse, tags=["Pacientes"])
+def buscar_pacientes(
+    nome: str = Query(..., min_length=2, description="Nome (parcial) do paciente"),
+    page: int = Query(1, ge=1, description="Página"),
+    limit: int = Query(20, ge=1, le=100, description="Resultados por página"),
+):
+    """
+    Busca pacientes por nome (LIKE %nome%).
+    Retorna lista paginada com última visita, total de visitas e dias sem visita.
+    """
+    try:
+        from .services.patient_profile import search_pacientes
+        result = search_pacientes(nome, page, limit)
+        items = [PacienteListItem(**i) for i in result["items"]]
+        return PacienteListResponse(
+            success=True,
+            total=result["total"],
+            page=result["page"],
+            limit=result["limit"],
+            data=items,
+        )
+    except Exception as e:
+        return PacienteListResponse(success=False, error=str(e))
+
+
+@app.get("/pacientes/{pac_reg}/perfil", response_model=PacientePerfilResponse, tags=["Pacientes"])
+def get_perfil_paciente(pac_reg: int):
+    """
+    Retorna o perfil completo de um paciente:
+      - Cartão de identidade (dados cadastrais + idade + tempo como paciente)
+      - Classificação: Novo / Recorrente / Fiel / VIP
+      - Resumo financeiro (total gasto, ticket médio, convênio principal)
+      - Histórico das últimas 20 visitas
+      - Top 10 exames mais realizados
+      - Orçamentos (com indicação se convertido e dias em aberto)
+    """
+    try:
+        from .services.patient_profile import get_paciente_perfil
+        perfil = get_paciente_perfil(pac_reg)
+        data = PacientePerfilData(
+            identidade=PacienteIdentidade(**perfil["identidade"]),
+            classificacao=PacienteClassificacao(**perfil["classificacao"]),
+            financeiro=PacienteResumoFinanceiro(**perfil["financeiro"]),
+            historico_visitas=[PacienteVisita(**v) for v in perfil["historico_visitas"]],
+            exames_mais_realizados=[PacienteExame(**e) for e in perfil["exames_mais_realizados"]],
+            orcamentos=[PacienteOrcamento(**o) for o in perfil["orcamentos"]],
+        )
+        return PacientePerfilResponse(success=True, data=data)
+    except Exception as e:
+        return PacientePerfilResponse(success=False, error=str(e))
 
 
 if __name__ == "__main__":

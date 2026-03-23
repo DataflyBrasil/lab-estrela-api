@@ -129,7 +129,7 @@ def get_unit_revenue(
         if not end_date:
             end_date = datetime.now().date()
 
-        cache_key = f"unit_revenue_{start_date}_{end_date}"
+        cache_key = f"unit_revenue_{current_db_id.get()}_{start_date}_{end_date}"
         if cache_key in analytics_cache:
             return analytics_cache[cache_key]
 
@@ -182,7 +182,7 @@ def handle_exam_sla_request(start_date, end_date, filter_type):
         if not end_date:
             end_date = datetime.now().date()
 
-        cache_key = f"sla_exame_{filter_type}_{start_date}_{end_date}"
+        cache_key = f"sla_exame_{current_db_id.get()}_{filter_type}_{start_date}_{end_date}"
         if cache_key in analytics_cache:
             return analytics_cache[cache_key]
 
@@ -258,7 +258,7 @@ def get_financial_strategic_analytics(
         if not end_date:
             end_date = datetime.now().date()
 
-        cache_key = f"financeiro_estrategico_{start_date}_{end_date}"
+        cache_key = f"financeiro_estrategico_{current_db_id.get()}_{start_date}_{end_date}"
         if cache_key in analytics_cache:
             return analytics_cache[cache_key]
 
@@ -347,7 +347,7 @@ def get_sla_operacional(
         if not end_date:
             end_date = datetime.now().date()
 
-        cache_key = f"operacional_sla_{start_date}_{end_date}"
+        cache_key = f"operacional_sla_{current_db_id.get()}_{start_date}_{end_date}"
         if cache_key in analytics_cache:
             return analytics_cache[cache_key]
 
@@ -591,7 +591,7 @@ def get_laudos_comparativo(
     start_str = str(start_date)
     end_str   = str(end_date)
 
-    cache_key = f"laudos_comparativo_{start_str}_{end_str}"
+    cache_key = f"laudos_comparativo_{current_db_id.get()}_{start_str}_{end_str}"
     if cache_key in analytics_cache:
         return analytics_cache[cache_key]
 

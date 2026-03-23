@@ -1,6 +1,7 @@
 import pandas as pd
 from typing import Tuple, Dict, List, Optional
 from ..models.base import BudgetMetrics, BudgetUnitItem, BudgetUserItem, BudgetSynthetic, OrcamentoItem, OrcamentoUnidadeItem
+from ..database import current_db_id
 
 def get_budget_data(cursor, start_date: str, end_date: str) -> pd.DataFrame:
     """
@@ -12,9 +13,10 @@ def get_budget_data(cursor, start_date: str, end_date: str) -> pd.DataFrame:
     - PAC_NOME not like 'teste%'
     """
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
-    
+    unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
+
     query = f"""
-    SELECT 
+    SELECT
         ORP.ORP_NUM,
         ORP.ORP_DTHR as data_cadastro,
         ORP.ORP_STATUS,
@@ -28,7 +30,7 @@ def get_budget_data(cursor, start_date: str, end_date: str) -> pd.DataFrame:
     INNER JOIN PAC WITH(NOLOCK) ON PAC.PAC_REG = ORP.ORP_PAC_REG
     WHERE ORP.ORP_DTHR {date_filter}
     AND ORP.ORP_STATUS IN ('A', 'P')
-    AND STR.STR_STR_COD LIKE '01%'
+    AND STR.STR_STR_COD LIKE '{unit_prefix}'
     AND PAC.PAC_NOME NOT LIKE 'teste%'
     GROUP BY 
         ORP.ORP_NUM,
@@ -177,6 +179,7 @@ def get_orcamentos_pacientes(cursor, start_date: str, end_date: str) -> List[Orc
     ordenada da data mais recente para a mais antiga.
     """
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
+    unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
 
     query = f"""
     SELECT
@@ -197,7 +200,7 @@ def get_orcamentos_pacientes(cursor, start_date: str, end_date: str) -> List[Orc
     INNER JOIN PAC WITH(NOLOCK) ON PAC.PAC_REG        = ORP.ORP_PAC_REG
     WHERE ORP.ORP_DTHR {date_filter}
       AND ORP.ORP_STATUS IN ('A', 'P')
-      AND STR.STR_STR_COD LIKE '01%'
+      AND STR.STR_STR_COD LIKE '{unit_prefix}'
       AND PAC.PAC_NOME NOT LIKE 'teste%'
     GROUP BY
         ORP.ORP_NUM,
@@ -243,6 +246,7 @@ def get_orcamentos_por_unidade(cursor, unidade: str, start_date: str, end_date: 
     incluindo indicação se o orçamento foi convertido em OS (ORP_OSM_NUM IS NOT NULL).
     """
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
+    unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
     unidade_filter = f"LTRIM(RTRIM(STR.STR_NOME)) = '{unidade.strip()}'"
 
     query = f"""
@@ -265,7 +269,7 @@ def get_orcamentos_por_unidade(cursor, unidade: str, start_date: str, end_date: 
     INNER JOIN PAC WITH(NOLOCK) ON PAC.PAC_REG        = ORP.ORP_PAC_REG
     WHERE ORP.ORP_DTHR {date_filter}
       AND ORP.ORP_STATUS IN ('A', 'P')
-      AND STR.STR_STR_COD LIKE '01%'
+      AND STR.STR_STR_COD LIKE '{unit_prefix}'
       AND PAC.PAC_NOME NOT LIKE 'teste%'
       AND {unidade_filter}
     GROUP BY

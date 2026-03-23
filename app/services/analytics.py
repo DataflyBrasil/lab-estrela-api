@@ -1,7 +1,9 @@
+import contextvars
 import pandas as pd
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .._db_runner import run_query_new_conn
+from ..database import current_db_id
 
 def get_unit_revenue_data(cursor, start_date, end_date):
     """
@@ -12,6 +14,7 @@ def get_unit_revenue_data(cursor, start_date, end_date):
     """
 
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
+    unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
 
     query_faturamento = f"""
     SELECT
@@ -26,7 +29,7 @@ def get_unit_revenue_data(cursor, start_date, end_date):
     WHERE o.osm_dthr {date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
     AND c.cnv_caixa_fatura IN ('C', 'F')
-    AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
+    AND s.str_str_cod LIKE '{unit_prefix}'
     GROUP BY s.str_nome
     """
 
@@ -38,13 +41,13 @@ def get_unit_revenue_data(cursor, start_date, end_date):
     INNER JOIN STR s ON o.osm_str = s.str_cod
     WHERE o.osm_dthr {date_filter}
     AND (o.osm_status IS NULL OR o.osm_status <> 'C')
-    AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
+    AND s.str_str_cod LIKE '{unit_prefix}'
     GROUP BY s.str_nome
     """
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_fat = pool.submit(run_query_new_conn, query_faturamento)
-        fut_ate = pool.submit(run_query_new_conn, query_osm_count)
+        fut_fat = pool.submit(contextvars.copy_context().run, run_query_new_conn, query_faturamento)
+        fut_ate = pool.submit(contextvars.copy_context().run, run_query_new_conn, query_osm_count)
         rows_fat = fut_fat.result()
         rows_ate = fut_ate.result()
 
@@ -279,6 +282,7 @@ def get_financial_analytics_data(cursor, start_date, end_date):
     """
 
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
+    unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
 
     # Query consolidada: um único scan agrupa por unidade + convenio + tipo.
     query_faturamento = f"""
@@ -295,7 +299,7 @@ def get_financial_analytics_data(cursor, start_date, end_date):
     WHERE o.osm_dthr {date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
     AND c.cnv_caixa_fatura IN ('C', 'F')
-    AND (s.str_str_cod LIKE '01%' OR s.str_str_cod LIKE '04%')
+    AND s.str_str_cod LIKE '{unit_prefix}'
     GROUP BY s.str_nome, c.cnv_nome, c.cnv_caixa_fatura
     """
     cursor.execute(query_faturamento)

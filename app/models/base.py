@@ -345,6 +345,7 @@ class PacienteListItem(BaseModel):
     ultima_visita: Optional[str] = None
     total_visitas: int = 0
     dias_sem_visita: int = 0
+    observacoes: Optional[str] = None
 
 class PacienteListResponse(BaseModel):
     success: bool
@@ -363,6 +364,7 @@ class PacienteIdentidade(BaseModel):
     fone: Optional[str] = None
     data_cadastro: Optional[str] = None
     tempo_como_paciente_dias: Optional[int] = None
+    observacoes: Optional[str] = None
 
 class PacienteClassificacao(BaseModel):
     categoria: str  # Novo | Recorrente | Fiel | VIP

@@ -1,5 +1,6 @@
 import pandas as pd
 from datetime import datetime, timedelta
+from ..database import current_db_id
 
 
 _EMPTY_COLS = ["data", "quantidade", "valor", "no_prazo", "atrasado"]
@@ -16,6 +17,7 @@ def get_laudos_comparativo_data(cursor, start_date: str, end_date: str):
     """
     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
     end_dt   = datetime.strptime(end_date,   '%Y-%m-%d')
+    unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
 
     try:
         start_anterior = start_dt.replace(year=start_dt.year - 1)
@@ -45,7 +47,7 @@ def get_laudos_comparativo_data(cursor, start_date: str, end_date: str):
     INNER JOIN STR STR_RECEP WITH(NOLOCK) ON STR_RECEP.STR_COD = OSM.OSM_STR
     WHERE RCL.RCL_DTHR_LIB BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'
       AND RCL.rcl_stat IN ('I', 'E', 'L')
-      AND STR_RECEP.STR_STR_COD LIKE '01%'
+      AND STR_RECEP.STR_STR_COD LIKE '{unit_prefix}'
       AND SMM.SMM_DT_RESULT IS NOT NULL
     GROUP BY CONVERT(varchar(10), RCL.RCL_DTHR_LIB, 120)
 
@@ -70,7 +72,7 @@ def get_laudos_comparativo_data(cursor, start_date: str, end_date: str):
     INNER JOIN STR STR_RECEP WITH(NOLOCK) ON STR_RECEP.STR_COD = OSM.OSM_STR
     WHERE RCL.RCL_DTHR_LIB BETWEEN '{start_anterior.strftime('%Y-%m-%d')} 00:00:00' AND '{end_anterior.strftime('%Y-%m-%d')} 23:59:59'
       AND RCL.rcl_stat IN ('I', 'E', 'L')
-      AND STR_RECEP.STR_STR_COD LIKE '01%'
+      AND STR_RECEP.STR_STR_COD LIKE '{unit_prefix}'
       AND SMM.SMM_DT_RESULT IS NOT NULL
     GROUP BY CONVERT(varchar(10), RCL.RCL_DTHR_LIB, 120)
     """

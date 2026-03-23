@@ -5,6 +5,7 @@ Endpoints suportados:
   - search_pacientes(nome, page, limit) → lista paginada
   - get_paciente_perfil(pac_reg)        → perfil completo em paralelo
 """
+import contextvars
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 
@@ -51,6 +52,8 @@ def search_pacientes(nome: str, page: int = 1, limit: int = 20) -> dict:
         LTRIM(RTRIM(ISNULL(p.pac_fone, '')))           AS fone,
         CONVERT(varchar(10), op.ultima_dthr, 120)      AS ultima_visita,
         op.total_visitas,
+        LTRIM(RTRIM(ISNULL(p.pac_obs,  '')))           AS obs1,
+        LTRIM(RTRIM(ISNULL(p.pac_obs2, '')))           AS obs2,
         COUNT(*) OVER()                                AS total_count
     FROM PAC p WITH(NOLOCK)
     INNER JOIN osm_pac op ON op.osm_pac = p.pac_reg
@@ -73,6 +76,11 @@ def search_pacientes(nome: str, page: int = 1, limit: int = 20) -> dict:
                 dias_sem = (hoje - datetime.strptime(ultima[:10], "%Y-%m-%d").date()).days
             except ValueError:
                 pass
+        # Combinar observações
+        o1 = r.get("obs1", "").strip()
+        o2 = r.get("obs2", "").strip()
+        obs = " ".join(filter(None, [o1, o2])) or None
+
         items.append({
             "pac_reg":         r["pac_reg"],
             "nome":            r["nome"],
@@ -82,6 +90,7 @@ def search_pacientes(nome: str, page: int = 1, limit: int = 20) -> dict:
             "ultima_visita":   ultima,
             "total_visitas":   int(r.get("total_visitas") or 0),
             "dias_sem_visita": dias_sem,
+            "observacoes":     obs,
         })
 
     return {"total": total, "page": page, "limit": limit, "items": items}
@@ -109,7 +118,9 @@ def get_paciente_perfil(pac_reg: int) -> dict:
         CONVERT(varchar(10), p.pac_nasc, 120)        AS nascimento,
         p.pac_sexo                                   AS sexo,
         LTRIM(RTRIM(ISNULL(p.pac_fone,  '')))       AS fone,
-        CONVERT(varchar(10), p.pac_dreg, 120)        AS data_cadastro
+        CONVERT(varchar(10), p.pac_dreg, 120)        AS data_cadastro,
+        LTRIM(RTRIM(ISNULL(p.pac_obs,  '')))        AS obs1,
+        LTRIM(RTRIM(ISNULL(p.pac_obs2, '')))        AS obs2
     FROM PAC p WITH(NOLOCK)
     WHERE p.pac_reg = {pac_reg}
     """
@@ -124,7 +135,7 @@ def get_paciente_perfil(pac_reg: int) -> dict:
         CONVERT(varchar(10), MIN(o.osm_dthr), 120)                                             AS primeira_visita,
         CONVERT(varchar(10), MAX(o.osm_dthr), 120)                                             AS ultima_visita,
         SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'C') = 'C' THEN sm.smm_vlr ELSE 0 END)      AS valor_particular,
-        SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'F') = 'F' THEN sm.smm_vlr ELSE 0 END)      AS valor_convenio,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'F'                THEN sm.smm_vlr ELSE 0 END)      AS valor_convenio,
         (
             SELECT TOP 1 ISNULL(LTRIM(RTRIM(c2.cnv_nome)), 'Particular')
             FROM OSM o2 WITH(NOLOCK)
@@ -198,7 +209,10 @@ def get_paciente_perfil(pac_reg: int) -> dict:
 
     results = {}
     with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(run_query_new_conn, q): key for key, q in parallel.items()}
+        futures = {
+            pool.submit(contextvars.copy_context().run, run_query_new_conn, q): key
+            for key, q in parallel.items()
+        }
         for f in as_completed(futures):
             results[futures[f]] = f.result()
 
@@ -222,6 +236,10 @@ def get_paciente_perfil(pac_reg: int) -> dict:
         except ValueError:
             pass
 
+    o1 = id_row.get("obs1", "").strip()
+    o2 = id_row.get("obs2", "").strip()
+    observacoes = " ".join(filter(None, [o1, o2])) or None
+
     identidade = {
         "pac_reg":                 id_row.get("pac_reg", pac_reg),
         "nome":                    id_row.get("nome", ""),
@@ -231,6 +249,7 @@ def get_paciente_perfil(pac_reg: int) -> dict:
         "fone":                    id_row.get("fone") or None,
         "data_cadastro":           cad_str,
         "tempo_como_paciente_dias": tempo_paciente,
+        "observacoes":             observacoes,
     }
 
     # --- Financeiro + convênio (mesma linha) ---

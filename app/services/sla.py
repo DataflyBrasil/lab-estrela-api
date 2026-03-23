@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import Tuple, Dict, List
+from ..database import current_db_id
 
 
 def get_sla_data(cursor, start_date: str, end_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -14,6 +15,7 @@ def get_sla_data(cursor, start_date: str, end_date: str) -> Tuple[pd.DataFrame, 
     O resultado tem ~30-60 linhas independente do volume do período.
     """
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
+    unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
 
     query_sla = f"""
     SELECT
@@ -48,7 +50,7 @@ def get_sla_data(cursor, start_date: str, end_date: str) -> Tuple[pd.DataFrame, 
     INNER JOIN STR STR_RECEP WITH(NOLOCK) ON STR_RECEP.STR_COD = OSM.OSM_STR
     WHERE RCL.RCL_DTHR_LIB {date_filter}
       AND RCL.rcl_stat IN ('I', 'E', 'L')
-      AND STR_RECEP.STR_STR_COD LIKE '01%'
+      AND STR_RECEP.STR_STR_COD LIKE '{unit_prefix}'
     GROUP BY
         STR.STR_NOME,
         STR_RECEP.STR_NOME,

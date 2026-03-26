@@ -365,6 +365,8 @@ class PacienteIdentidade(BaseModel):
     data_cadastro: Optional[str] = None
     tempo_como_paciente_dias: Optional[int] = None
     observacoes: Optional[str] = None
+    medico_principal: Optional[str] = None
+    unidade_principal: Optional[str] = None
 
 class PacienteClassificacao(BaseModel):
     categoria: str  # Novo | Recorrente | Fiel | VIP
@@ -372,6 +374,7 @@ class PacienteClassificacao(BaseModel):
     primeira_visita: Optional[str] = None
     ultima_visita: Optional[str] = None
     dias_sem_visita: int
+    frequencia_visitas_dias: Optional[int] = None
 
 class PacienteResumoFinanceiro(BaseModel):
     total_gasto: float
@@ -380,6 +383,7 @@ class PacienteResumoFinanceiro(BaseModel):
     valor_particular: float
     valor_convenio: float
     percent_particular: float
+    taxa_conversao_orcamento: float = 0.0
 
 class PacienteVisita(BaseModel):
     osm_num: int
@@ -435,4 +439,129 @@ class LaudosComparativoData(BaseModel):
 class LaudosComparativoResponse(BaseModel):
     success: bool
     data: Optional[LaudosComparativoData] = None
+    error: Optional[str] = None
+
+
+# --- Modular Comparison / BI v2 ---
+
+class ComparisonValue(BaseModel):
+    period_label: str  # e.g. "Atual", "Anterior 1", "Anterior 2" or "2024"
+    value: float
+
+class ComparisonMetric(BaseModel):
+    field: str
+    values: List[ComparisonValue]
+
+class ComparisonPoint(BaseModel):
+    virtual_date: str  # Alinhado (e.g. "01-01")
+    metrics: List[ComparisonMetric]
+
+class ModularComparisonData(BaseModel):
+    points: List[ComparisonPoint]
+    totals: List[ComparisonMetric]
+
+class ModularComparisonResponse(BaseModel):
+    success: bool
+    data: Optional[ModularComparisonData] = None
+    error: Optional[str] = None
+
+class DiscoveryEntity(BaseModel):
+    name: str
+    fields: List[str]
+
+class DiscoveryResponse(BaseModel):
+    success: bool
+    data: List[DiscoveryEntity]
+    error: Optional[str] = None
+
+
+# --- Enhancements v3 ---
+
+class UnitComparisonMetrics(BaseModel):
+    # Consolidated metrics for a unit in a specific period
+    period_label: str
+    laudos_count: int
+    laudos_value: float
+    orcamentos_count: int
+    orcamentos_conversion: float
+    faturamento_total: float
+    ticket_medio: float
+
+class UnitComparativeDashboard(BaseModel):
+    unidade_nome: str
+    unidade_cod: str
+    comparativos: List[UnitComparisonMetrics]
+    diarios: Optional[ModularComparisonData] = None # Optional daily breakdown
+
+class UnitComparativeResponse(BaseModel):
+    success: bool
+    data: Optional[UnitComparativeDashboard] = None
+    error: Optional[str] = None
+
+class RankingAgent(BaseModel):
+    nome: str
+    period_label: str
+    rank: int
+    rank_delta: int = 0 # Difference from previous period
+    valor: float
+    volume: int
+
+class RankingComparisonData(BaseModel):
+    entity_type: str # "medicos" or "recepcionistas"
+    agents: List[RankingAgent]
+
+class RankingComparisonResponse(BaseModel):
+    success: bool
+    data: Optional[RankingComparisonData] = None
+    error: Optional[str] = None
+
+class ProjectionPoint(BaseModel):
+    label: str # "Realizado", "Projetado (Conservador)", "Projetado (Otimista)"
+    valor: float
+
+class ProjectionResult(BaseModel):
+    entity: str
+    last_update: str
+    current_value: float
+    projections: List[ProjectionPoint]
+    confidence_score: float
+
+class ProjectionResponse(BaseModel):
+    success: bool
+    data: Optional[ProjectionResult] = None
+    error: Optional[str] = None
+
+# --- Exam Deep Dive / Detail ---
+
+class ExamDetailSummary(BaseModel):
+    cod: str
+    nome: str
+    qtd_total: int
+    faturado_bruto: float
+    faturado_liquido: float
+    ticket_medio: float
+    prazo_medio_dias: float
+
+class ExamInsightItem(BaseModel):
+    nome: str
+    qtd: int
+    valor: float
+
+class ExamPatientItem(BaseModel):
+    data: str
+    paciente: str
+    osm: int
+    convenio: str
+    valor: float
+
+class ExamDetailData(BaseModel):
+    resumo: ExamDetailSummary
+    ranking_medicos: List[ExamInsightItem]
+    ranking_unidades: List[ExamInsightItem]
+    ranking_convenios: List[ExamInsightItem]
+    ultimos_pacientes: List[ExamPatientItem]
+
+class ExamDetailResponse(BaseModel):
+    success: bool
+    data: Optional[ExamDetailData] = None
     error: Optional[str] = None

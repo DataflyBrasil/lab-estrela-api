@@ -21,6 +21,9 @@ from .models.base import (
     PacientePerfilResponse, PacientePerfilData,
     PacienteIdentidade, PacienteClassificacao, PacienteResumoFinanceiro,
     PacienteVisita, PacienteExame, PacienteOrcamento,
+    ModularComparisonResponse, DiscoveryResponse,
+    UnitComparativeResponse, RankingComparisonResponse, ProjectionResponse,
+    ExamDetailResponse, ExamDetailData, ExamDetailSummary, ExamInsightItem, ExamPatientItem
 )
 from .services.analytics import (
     get_unit_revenue_data, 
@@ -38,6 +41,12 @@ from .services.analytics import (
 )
 from .services.strategic import get_strategic_indicators, get_units
 from .services.cache import analytics_cache
+from .services.comparison import (
+    get_comparison_metadata, get_laudos_comparison_v2,
+    get_orcamentos_comparison, get_financeiro_comparison,
+    get_unit_comparative_dashboard, get_ranking_comparison,
+    get_performance_projections
+)
 from .ai.api.router import router as ai_router
 
 app = FastAPI(title="Laboratório Estrela API", version="2.0.0")
@@ -45,8 +54,8 @@ app = FastAPI(title="Laboratório Estrela API", version="2.0.0")
 # Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
-    # allow_origins=["http://localhost:3000", "http://localhost:3001", "*"],
-    allow_origins=["https://labestrelabi.com.br", "https://app.labestrelabi.com.br"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001", "*"],
+    # allow_origins=["https://labestrelabi.com.br", "https://app.labestrelabi.com.br"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -92,13 +101,25 @@ def management_indicators(
     Retorna os indicadores estratégicos baseados na aba PA CAPA do Excel.
     """
     try:
+        # Seleção automática de banco se unidade for Paulo Afonso
+        db_id = current_db_id.get()
+        if unidade and "PAULO AFONSO" in unidade.upper():
+            db_id = "2"
+            current_db_id.set(db_id)
+
+        cache_key = f"management_indicators_{db_id}_{start_date}_{end_date}_{unidade}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
         conn = get_db_connection()
         cursor = conn.cursor(as_dict=True)
         
         indicators = get_strategic_indicators(cursor, start_date, end_date, unidade)
         
         release_connection(conn)
-        return StrategicIndicatorsResponse(success=True, data=indicators)
+        response = StrategicIndicatorsResponse(success=True, data=indicators)
+        analytics_cache[cache_key] = response
+        return response
     except Exception as e:
         return StrategicIndicatorsResponse(success=False, error=str(e))
 
@@ -625,16 +646,25 @@ def buscar_pacientes(
     Retorna lista paginada com última visita, total de visitas e dias sem visita.
     """
     try:
+        db_id = current_db_id.get()
+        cache_key = f"paciente_busca_{db_id}_{nome}_{page}_{limit}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
         from .services.patient_profile import search_pacientes
         result = search_pacientes(nome, page, limit)
         items = [PacienteListItem(**i) for i in result["items"]]
-        return PacienteListResponse(
+        
+        response = PacienteListResponse(
             success=True,
             total=result["total"],
             page=result["page"],
             limit=result["limit"],
             data=items,
         )
+        
+        analytics_cache[cache_key] = response
+        return response
     except Exception as e:
         return PacienteListResponse(success=False, error=str(e))
 
@@ -642,17 +672,18 @@ def buscar_pacientes(
 @app.get("/pacientes/{pac_reg}/perfil", response_model=PacientePerfilResponse, tags=["Pacientes"])
 def get_perfil_paciente(pac_reg: int):
     """
-    Retorna o perfil completo de um paciente:
-      - Cartão de identidade (dados cadastrais + idade + tempo como paciente)
-      - Classificação: Novo / Recorrente / Fiel / VIP
-      - Resumo financeiro (total gasto, ticket médio, convênio principal)
-      - Histórico das últimas 20 visitas
-      - Top 10 exames mais realizados
-      - Orçamentos (com indicação se convertido e dias em aberto)
+    Retorna o perfil completo de um paciente com insights estratégicos e caching.
     """
+    db_id = current_db_id.get()
+    cache_key = f"perfil_{pac_reg}_{db_id}"
+    
+    if cache_key in analytics_cache:
+        return PacientePerfilResponse(success=True, data=analytics_cache[cache_key])
+
     try:
         from .services.patient_profile import get_paciente_perfil
         perfil = get_paciente_perfil(pac_reg)
+        
         data = PacientePerfilData(
             identidade=PacienteIdentidade(**perfil["identidade"]),
             classificacao=PacienteClassificacao(**perfil["classificacao"]),
@@ -661,10 +692,199 @@ def get_perfil_paciente(pac_reg: int):
             exames_mais_realizados=[PacienteExame(**e) for e in perfil["exames_mais_realizados"]],
             orcamentos=[PacienteOrcamento(**o) for o in perfil["orcamentos"]],
         )
+        
+        analytics_cache[cache_key] = data
         return PacientePerfilResponse(success=True, data=data)
     except Exception as e:
         return PacientePerfilResponse(success=False, error=str(e))
 
+
+# --- Modular Comparison / BI v2 ---
+
+@app.get("/comparativo/metadados", response_model=DiscoveryResponse, tags=["Comparativo"])
+def get_metadata():
+    try:
+        data = get_comparison_metadata()
+        return DiscoveryResponse(success=True, data=data)
+    except Exception as e:
+        return DiscoveryResponse(success=False, data=[], error=str(e))
+
+@app.get("/comparativo/laudos_v2", response_model=ModularComparisonResponse, tags=["Comparativo"])
+def get_laudos_comparison(
+    start_date: date = Query(..., description="Data inicial (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="Data final (YYYY-MM-DD)"),
+    years_back: int = Query(1, ge=0, le=5, description="Anos para trás"),
+    granularity: str = Query("diario", pattern="^(diario|mensal|anual)$", description="Granularidade: diario, mensal, anual")
+):
+    try:
+        db_id = current_db_id.get()
+        cache_key = f"laudos_v2_{db_id}_{start_date}_{end_date}_{years_back}_{granularity}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        data = get_laudos_comparison_v2(cursor, str(start_date), str(end_date), years_back, granularity)
+        release_connection(conn)
+        
+        response = ModularComparisonResponse(success=True, data=data)
+        analytics_cache[cache_key] = response
+        return response
+    except Exception as e:
+        return ModularComparisonResponse(success=False, error=str(e))
+
+@app.get("/comparativo/orcamentos", response_model=ModularComparisonResponse, tags=["Comparativo"])
+def get_budgets_comparison(
+    start_date: date = Query(..., description="Data inicial (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="Data final (YYYY-MM-DD)"),
+    years_back: int = Query(1, ge=0, le=5, description="Anos para trás"),
+    granularity: str = Query("diario", pattern="^(diario|mensal|anual)$", description="Granularidade: diario, mensal, anual")
+):
+    try:
+        db_id = current_db_id.get()
+        cache_key = f"orcamentos_comparativo_{db_id}_{start_date}_{end_date}_{years_back}_{granularity}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        data = get_orcamentos_comparison(cursor, str(start_date), str(end_date), years_back, granularity)
+        release_connection(conn)
+        
+        response = ModularComparisonResponse(success=True, data=data)
+        analytics_cache[cache_key] = response
+        return response
+    except Exception as e:
+        return ModularComparisonResponse(success=False, error=str(e))
+
+@app.get("/comparativo/financeiro", response_model=ModularComparisonResponse, tags=["Comparativo"])
+def get_financial_comparison(
+    start_date: date = Query(..., description="Data inicial (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="Data final (YYYY-MM-DD)"),
+    years_back: int = Query(1, ge=0, le=5, description="Anos para trás"),
+    granularity: str = Query("diario", pattern="^(diario|mensal|anual)$", description="Granularidade: diario, mensal, anual")
+):
+    try:
+        db_id = current_db_id.get()
+        cache_key = f"financeiro_comparativo_{db_id}_{start_date}_{end_date}_{years_back}_{granularity}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        data = get_financeiro_comparison(cursor, str(start_date), str(end_date), years_back, granularity)
+        release_connection(conn)
+        
+        response = ModularComparisonResponse(success=True, data=data)
+        analytics_cache[cache_key] = response
+        return response
+    except Exception as e:
+        return ModularComparisonResponse(success=False, error=str(e))
+
+
+@app.get("/comparativo/unidade", response_model=UnitComparativeResponse, tags=["Comparativo"])
+def get_unit_dashboard(
+    unidade: str = Query(..., description="Código da unidade (str_cod)"),
+    start_date: date = Query(..., description="Data inicial"),
+    end_date: date = Query(..., description="Data final"),
+    years_back: int = Query(1, ge=0, le=5)
+):
+    try:
+        db_id = current_db_id.get()
+        cache_key = f"unit_dashboard_{db_id}_{unidade}_{start_date}_{end_date}_{years_back}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        data = get_unit_comparative_dashboard(cursor, unidade, str(start_date), str(end_date), years_back)
+        release_connection(conn)
+        
+        response = UnitComparativeResponse(success=True, data=data)
+        analytics_cache[cache_key] = response
+        return response
+    except Exception as e:
+        return UnitComparativeResponse(success=False, error=str(e))
+
+@app.get("/comparativo/ranking", response_model=RankingComparisonResponse, tags=["Comparativo"])
+def get_ranking_comp(
+    entity_type: str = Query(..., pattern="^(medicos|recepcionistas)$"),
+    start_date: date = Query(..., description="Data inicial"),
+    end_date: date = Query(..., description="Data final"),
+    years_back: int = Query(1, ge=0, le=5),
+    unidade: Optional[str] = Query(None, description="Opcional: Filtrar por unidade")
+):
+    try:
+        db_id = current_db_id.get()
+        cache_key = f"ranking_comparativo_{db_id}_{entity_type}_{start_date}_{end_date}_{years_back}_{unidade}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        data = get_ranking_comparison(cursor, entity_type, str(start_date), str(end_date), years_back, unidade)
+        release_connection(conn)
+        
+        response = RankingComparisonResponse(success=True, data=data)
+        analytics_cache[cache_key] = response
+        return response
+    except Exception as e:
+        return RankingComparisonResponse(success=False, error=str(e))
+
+@app.get("/comparativo/projecao", response_model=ProjectionResponse, tags=["Comparativo"])
+def get_projections_route(
+    entity: str = Query("faturamento", description="Entidade para projeção")
+):
+    try:
+        db_id = current_db_id.get()
+        cache_key = f"projecao_{db_id}_{entity}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        data = get_performance_projections(cursor, entity)
+        release_connection(conn)
+        
+        response = ProjectionResponse(success=True, data=data)
+        analytics_cache[cache_key] = response
+        return response
+    except Exception as e:
+        return ProjectionResponse(success=False, error=str(e))
+
+@app.get("/exames/{exame_cod}/detalhes", response_model=ExamDetailResponse, tags=["Exames"])
+def get_detalhes_exame(
+    exame_cod: str,
+    start_date: date = Query(..., description="Data inicial (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="Data final (YYYY-MM-DD)"),
+    tpcod: str = Query('LB', description="Tipo do exame (LB, etc)")
+):
+    """
+    Retorna o aprofundamento de um exame específico com insights estratégicos.
+    """
+    db_id = current_db_id.get()
+    cache_key = f"exam_detail_{exame_cod}_{start_date}_{end_date}_{tpcod}_{db_id}"
+    
+    if cache_key in analytics_cache:
+        return ExamDetailResponse(success=True, data=analytics_cache[cache_key])
+
+    try:
+        from .services.exam_detail import get_exam_details
+        details = get_exam_details(exame_cod, str(start_date), str(end_date), tpcod)
+        
+        data = ExamDetailData(
+            resumo=ExamDetailSummary(**details["resumo"]),
+            ranking_medicos=[ExamInsightItem(**r) for r in details["ranking_medicos"]],
+            ranking_unidades=[ExamInsightItem(**r) for r in details["ranking_unidades"]],
+            ranking_convenios=[ExamInsightItem(**r) for r in details["ranking_convenios"]],
+            ultimos_pacientes=[ExamPatientItem(**r) for r in details["ultimos_pacientes"]]
+        )
+        
+        analytics_cache[cache_key] = data
+        return ExamDetailResponse(success=True, data=data)
+    except Exception as e:
+        print(f"Erro no endpoint /exames/detalhes: {e}")
+        return ExamDetailResponse(success=False, error=str(e))
 
 if __name__ == "__main__":
     import uvicorn

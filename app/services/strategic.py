@@ -3,6 +3,7 @@ from app._db_runner import run_query_new_conn
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import contextvars
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +71,20 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     # -----------------------------------------------------------------------
     query_super = f"""
     SELECT
-        SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'C') = 'C' THEN sm.smm_vlr ELSE 0 END)  AS valor_particular,
-        SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'F') = 'F' THEN sm.smm_vlr ELSE 0 END)  AS valor_convenio,
-        COUNT(DISTINCT o.osm_num)                                                           AS total_pacientes,
-        COUNT(*)                                                                            AS total_exames,
-        COUNT(DISTINCT o.osm_usr_login_cad)                                                AS qtd_colaboradores,
-        SUM(CASE WHEN sm.smm_vlr = 0 THEN 1 ELSE 0 END)                                   AS cortesias,
-        SUM(ISNULL(sm.smm_vlr_desconto, 0))                                                AS total_desconto
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'C' THEN sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0) ELSE 0 END) AS valor_particular,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'F' THEN sm.smm_vlr ELSE 0 END)                             AS valor_convenio,
+        COUNT(DISTINCT o.osm_num)                                                                    AS total_pacientes,
+        COUNT(*)                                                                                     AS total_exames,
+        COUNT(DISTINCT o.osm_usr_login_cad)                                                         AS qtd_colaboradores,
+        SUM(CASE WHEN sm.smm_vlr = 0 THEN 1 ELSE 0 END)                                            AS cortesias,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'C' THEN -ISNULL(sm.SMM_AJUSTE_VLR, 0) ELSE 0 END)        AS total_desconto
     FROM OSM o WITH(NOLOCK)
     INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
     LEFT JOIN CNV c WITH(NOLOCK) ON o.osm_cnv = c.cnv_cod
     {unit_join}
     WHERE o.osm_dthr {date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
+    AND c.cnv_caixa_fatura IN ('C', 'F')
     {unit_where}
     """
 
@@ -102,12 +104,14 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     # Queries independentes (rodam em paralelo)
     # -----------------------------------------------------------------------
     query_prev = f"""
-    SELECT SUM(sm.smm_vlr) AS total
+    SELECT SUM(sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0)) AS total
     FROM OSM o WITH(NOLOCK)
     INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
+    INNER JOIN CNV c  WITH(NOLOCK) ON o.osm_cnv = c.cnv_cod
     {unit_join}
     WHERE o.osm_dthr {prev_date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
+    AND c.cnv_caixa_fatura IN ('C', 'F')
     {unit_where}
     """
 
@@ -117,15 +121,17 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
         SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'C') = 'C' THEN 1 ELSE 0 END) AS particular,
         SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'F') = 'F' THEN 1 ELSE 0 END) AS convenio
     FROM PAC p WITH(NOLOCK)
-    INNER JOIN (
-        SELECT osm_pac, MIN(osm_dthr) AS min_dthr, MIN(osm_cnv) AS fst_cnv, MIN(osm_str) AS fst_str
-        FROM OSM WITH(NOLOCK)
-        GROUP BY osm_pac
-    ) o ON p.pac_reg = o.osm_pac AND o.min_dthr {date_filter}
-    LEFT JOIN CNV c WITH(NOLOCK) ON o.fst_cnv = c.cnv_cod
-    INNER JOIN STR s WITH(NOLOCK) ON o.fst_str = s.str_cod
+    CROSS APPLY (
+        SELECT TOP 1 osm_dthr, osm_cnv, osm_str
+        FROM OSM o WITH(NOLOCK)
+        WHERE o.osm_pac = p.pac_reg
+        ORDER BY o.osm_dthr ASC
+    ) o
+    LEFT JOIN CNV c WITH(NOLOCK) ON o.osm_cnv = c.cnv_cod
+    INNER JOIN STR s WITH(NOLOCK) ON o.osm_str = s.str_cod
     WHERE p.pac_dreg {date_filter}
-    {unit_where}
+      AND o.osm_dthr {date_filter}
+      {unit_where}
     """
 
     query_orc = f"""
@@ -148,9 +154,9 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     SELECT TOP 10
         p.psv_nome AS nome,
         COUNT(DISTINCT o.osm_num) AS qtd_pedidos,
-        SUM(sm.smm_vlr) AS valor_total,
-        SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'C') = 'C' THEN sm.smm_vlr ELSE 0 END) AS valor_particular,
-        SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'F') = 'F' THEN sm.smm_vlr ELSE 0 END) AS valor_convenio
+        SUM(sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0)) AS valor_total,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'C' THEN sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0) ELSE 0 END) AS valor_particular,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'F' THEN sm.smm_vlr ELSE 0 END) AS valor_convenio
     FROM OSM o WITH(NOLOCK)
     INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
     INNER JOIN PSV p WITH(NOLOCK) ON o.osm_mreq = p.psv_cod
@@ -158,6 +164,7 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     {unit_join}
     WHERE o.osm_dthr {date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
+    AND c.cnv_caixa_fatura IN ('C', 'F')
     {unit_where}
     GROUP BY p.psv_nome
     ORDER BY valor_total DESC
@@ -167,9 +174,9 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     SELECT TOP 10
         o.osm_usr_login_cad AS usuario,
         COUNT(DISTINCT o.osm_num) AS pacientes,
-        SUM(sm.smm_vlr) AS faturamento,
-        SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'C') = 'C' THEN sm.smm_vlr ELSE 0 END) AS valor_particular,
-        SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'F') = 'F' THEN sm.smm_vlr ELSE 0 END) AS valor_convenio,
+        SUM(sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0)) AS faturamento,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'C' THEN sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0) ELSE 0 END) AS valor_particular,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'F' THEN sm.smm_vlr ELSE 0 END) AS valor_convenio,
         MAX(s.str_nome) AS unidade_principal
     FROM OSM o WITH(NOLOCK)
     INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
@@ -177,6 +184,7 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     {unit_join}
     WHERE o.osm_dthr {date_filter}
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
+    AND c.cnv_caixa_fatura IN ('C', 'F')
     {unit_where}
     GROUP BY o.osm_usr_login_cad
     ORDER BY faturamento DESC
@@ -202,7 +210,10 @@ def get_strategic_indicators(cursor, start_date: str, end_date: str, unidade: st
     results = {}
     logger.info("Executando queries paralelas...")
     with ThreadPoolExecutor(max_workers=7) as pool:
-        futures = {pool.submit(run_query_new_conn, q): key for key, q in parallel_queries.items()}
+        futures = {
+            pool.submit(contextvars.copy_context().run, run_query_new_conn, q): key 
+            for key, q in parallel_queries.items()
+        }
         for future in as_completed(futures):
             key = futures[future]
             results[key] = future.result()

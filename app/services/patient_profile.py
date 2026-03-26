@@ -29,36 +29,44 @@ def search_pacientes(nome: str, page: int = 1, limit: int = 20) -> dict:
     nome_safe = nome.strip().replace("'", "''")
     unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
 
-    # CTE pré-agrega OSM → 1 linha por paciente antes de juntar com PAC.
-    # Evita o padrão "explode linhas → GROUP BY" que força o SQL Server a
-    # processar e colapsar todo o volume de OSM para depois paginar.
+    # Otimização: Filtrar por nome PRIMEIRO (na PAC) e depois buscar métricas via CROSS APPLY.
+    # Isso evita varrer a tabela OSM inteira para todos os pacientes antes de filtrar pelo nome.
     query = f"""
-    WITH osm_pac AS (
-        SELECT
-            o.osm_pac,
+    SELECT
+        pk.pac_reg,
+        pk.nome,
+        pk.nascimento,
+        pk.sexo,
+        pk.fone,
+        CONVERT(varchar(10), op.ultima_dthr, 120) AS ultima_visita,
+        ISNULL(op.total_visitas, 0)               AS total_visitas,
+        pk.obs1,
+        pk.obs2,
+        COUNT(*) OVER()                           AS total_count
+    FROM (
+        SELECT 
+            p.pac_reg,
+            LTRIM(RTRIM(p.pac_nome))                   AS nome,
+            CONVERT(varchar(10), p.pac_nasc, 120)       AS nascimento,
+            p.pac_sexo                                 AS sexo,
+            LTRIM(RTRIM(ISNULL(p.pac_fone, '')))        AS fone,
+            LTRIM(RTRIM(ISNULL(p.pac_obs,  '')))        AS obs1,
+            LTRIM(RTRIM(ISNULL(p.pac_obs2, '')))        AS obs2
+        FROM PAC p WITH(NOLOCK)
+        WHERE p.pac_nome LIKE '%{nome_safe}%'
+          AND p.pac_nome NOT LIKE 'teste%'
+    ) pk
+    CROSS APPLY (
+        SELECT 
             MAX(o.osm_dthr)           AS ultima_dthr,
             COUNT(DISTINCT o.osm_num) AS total_visitas
         FROM OSM o WITH(NOLOCK)
         INNER JOIN STR s WITH(NOLOCK) ON s.str_cod = o.osm_str
-        WHERE o.osm_status <> 'C'
+        WHERE o.osm_pac = pk.pac_reg
+          AND o.osm_status <> 'C'
           AND s.str_str_cod LIKE '{unit_prefix}'
-        GROUP BY o.osm_pac
-    )
-    SELECT
-        p.pac_reg,
-        LTRIM(RTRIM(p.pac_nome))                      AS nome,
-        CONVERT(varchar(10), p.pac_nasc, 120)          AS nascimento,
-        p.pac_sexo                                      AS sexo,
-        LTRIM(RTRIM(ISNULL(p.pac_fone, '')))           AS fone,
-        CONVERT(varchar(10), op.ultima_dthr, 120)      AS ultima_visita,
-        op.total_visitas,
-        LTRIM(RTRIM(ISNULL(p.pac_obs,  '')))           AS obs1,
-        LTRIM(RTRIM(ISNULL(p.pac_obs2, '')))           AS obs2,
-        COUNT(*) OVER()                                AS total_count
-    FROM PAC p WITH(NOLOCK)
-    INNER JOIN osm_pac op ON op.osm_pac = p.pac_reg
-    WHERE p.pac_nome LIKE '%{nome_safe}%'
-      AND p.pac_nome NOT LIKE 'teste%'
+    ) op
+    WHERE op.ultima_dthr IS NOT NULL
     ORDER BY op.ultima_dthr DESC
     OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY
     """
@@ -125,26 +133,36 @@ def get_paciente_perfil(pac_reg: int) -> dict:
     WHERE p.pac_reg = {pac_reg}
     """
 
-    # Financeiro + convênio principal fundidos em uma única varredura de OSM.
-    # A subquery do convênio principal roda sobre o mesmo conjunto restrito
-    # (pac_reg + status), que o SQL Server costuma materializar em memória.
+    # Financeiro + convênio principal + insights (médico/unidade) fundidos.
     q_financeiro = f"""
     SELECT
         COUNT(DISTINCT o.osm_num)                                                              AS total_visitas,
-        SUM(sm.smm_vlr)                                                                        AS total_gasto,
+        SUM(sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0))                                         AS total_gasto,
         CONVERT(varchar(10), MIN(o.osm_dthr), 120)                                             AS primeira_visita,
         CONVERT(varchar(10), MAX(o.osm_dthr), 120)                                             AS ultima_visita,
-        SUM(CASE WHEN ISNULL(c.cnv_caixa_fatura, 'C') = 'C' THEN sm.smm_vlr ELSE 0 END)      AS valor_particular,
-        SUM(CASE WHEN c.cnv_caixa_fatura = 'F'                THEN sm.smm_vlr ELSE 0 END)      AS valor_convenio,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'C' THEN sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0) ELSE 0 END) AS valor_particular,
+        SUM(CASE WHEN c.cnv_caixa_fatura = 'F' THEN sm.smm_vlr ELSE 0 END)                     AS valor_convenio,
         (
             SELECT TOP 1 ISNULL(LTRIM(RTRIM(c2.cnv_nome)), 'Particular')
             FROM OSM o2 WITH(NOLOCK)
             LEFT JOIN CNV c2 WITH(NOLOCK) ON o2.osm_cnv = c2.cnv_cod
-            WHERE o2.osm_pac = {pac_reg}
-              AND o2.osm_status <> 'C'
-            GROUP BY c2.cnv_nome
-            ORDER BY COUNT(*) DESC
-        ) AS convenio_principal
+            WHERE o2.osm_pac = {pac_reg} AND o2.osm_status <> 'C'
+            GROUP BY c2.cnv_nome ORDER BY COUNT(*) DESC
+        ) AS convenio_principal,
+        (
+            SELECT TOP 1 LTRIM(RTRIM(p2.psv_nome))
+            FROM OSM o3 WITH(NOLOCK)
+            INNER JOIN PSV p2 WITH(NOLOCK) ON o3.osm_mreq = p2.psv_cod
+            WHERE o3.osm_pac = {pac_reg} AND o3.osm_status <> 'C'
+            GROUP BY p2.psv_nome ORDER BY COUNT(*) DESC
+        ) AS medico_principal,
+        (
+            SELECT TOP 1 LTRIM(RTRIM(s2.str_nome))
+            FROM OSM o4 WITH(NOLOCK)
+            INNER JOIN STR s2 WITH(NOLOCK) ON o4.osm_str = s2.str_cod
+            WHERE o4.osm_pac = {pac_reg} AND o4.osm_status <> 'C'
+            GROUP BY s2.str_nome ORDER BY COUNT(*) DESC
+        ) AS unidade_principal
     FROM OSM o WITH(NOLOCK)
     INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
     LEFT  JOIN CNV c  WITH(NOLOCK) ON o.osm_cnv = c.cnv_cod
@@ -158,7 +176,7 @@ def get_paciente_perfil(pac_reg: int) -> dict:
         o.osm_num,
         CONVERT(varchar(19), o.osm_dthr, 120)     AS data,
         LTRIM(RTRIM(s.str_nome))                   AS unidade,
-        SUM(sm.smm_vlr)                            AS valor,
+        SUM(sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0)) AS valor,
         COUNT(sm.smm_num)                          AS qtd_exames
     FROM OSM o WITH(NOLOCK)
     INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
@@ -174,7 +192,7 @@ def get_paciente_perfil(pac_reg: int) -> dict:
     SELECT TOP 10
         LTRIM(RTRIM(k.smk_nome))  AS exame,
         SUM(sm.smm_qt)            AS frequencia,
-        SUM(sm.smm_vlr)           AS valor_total
+        SUM(sm.smm_vlr + ISNULL(sm.SMM_AJUSTE_VLR, 0)) AS valor_total
     FROM OSM o WITH(NOLOCK)
     INNER JOIN SMM sm WITH(NOLOCK) ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
     INNER JOIN SMK k  WITH(NOLOCK) ON k.smk_cod = sm.smm_cod AND k.smk_tipo = sm.smm_tpcod
@@ -199,12 +217,22 @@ def get_paciente_perfil(pac_reg: int) -> dict:
     ORDER BY r.ORP_DTHR DESC
     """
 
+    # Query adicional para taxa de conversão global do paciente
+    q_conversoes = f"""
+    SELECT 
+        COUNT(*) as total_orc,
+        SUM(CASE WHEN ORP_OSM_NUM IS NOT NULL THEN 1 ELSE 0 END) as convertidos
+    FROM ORP WITH(NOLOCK)
+    WHERE ORP_PAC_REG = {pac_reg}
+    """
+
     parallel = {
         "identidade": q_identidade,
         "financeiro": q_financeiro,
         "visitas":    q_visitas,
         "exames":     q_exames,
         "orcamentos": q_orcamentos,
+        "conversoes": q_conversoes,
     }
 
     results = {}
@@ -252,7 +280,7 @@ def get_paciente_perfil(pac_reg: int) -> dict:
         "observacoes":             observacoes,
     }
 
-    # --- Financeiro + convênio (mesma linha) ---
+    # --- Financeiro + convênio + insights ---
     fin_row       = results["financeiro"][0] if results["financeiro"] else {}
     total_visitas = int(fin_row.get("total_visitas") or 0)
     total_gasto   = float(fin_row.get("total_gasto") or 0)
@@ -261,23 +289,51 @@ def get_paciente_perfil(pac_reg: int) -> dict:
     ticket_medio  = total_gasto / total_visitas if total_visitas > 0 else 0.0
     total_fin     = val_part + val_conv
     pct_part      = (val_part / total_fin * 100) if total_fin > 0 else 0.0
+    
+    # Orçamentos
+    conv_row    = results["conversoes"][0] if results["conversoes"] else {}
+    tot_orc     = int(conv_row.get("total_orc") or 0)
+    tot_conv    = int(conv_row.get("convertidos") or 0)
+    taxa_orc    = (tot_conv / tot_orc * 100) if tot_orc > 0 else 0.0
 
     primeira_visita = fin_row.get("primeira_visita")
     ultima_visita   = fin_row.get("ultima_visita")
     dias_sem_visita = 0
-    if ultima_visita:
+    frequencia_dias = None
+    
+    if ultima_visita and primeira_visita:
         try:
-            dias_sem_visita = (hoje - datetime.strptime(ultima_visita[:10], "%Y-%m-%d").date()).days
+            d_ultima = datetime.strptime(ultima_visita[:10], "%Y-%m-%d").date()
+            d_primeira = datetime.strptime(primeira_visita[:10], "%Y-%m-%d").date()
+            dias_sem_visita = (hoje - d_ultima).days
+            periodo_total = (d_ultima - d_primeira).days
+            if total_visitas > 1 and periodo_total > 0:
+                frequencia_dias = int(periodo_total / (total_visitas - 1))
         except ValueError:
             pass
 
+    identidade = {
+        "pac_reg":                 id_row.get("pac_reg", pac_reg),
+        "nome":                    id_row.get("nome", ""),
+        "nascimento":              nasc_str,
+        "idade":                   idade,
+        "sexo":                    id_row.get("sexo"),
+        "fone":                    id_row.get("fone") or None,
+        "data_cadastro":           cad_str,
+        "tempo_como_paciente_dias": tempo_paciente,
+        "observacoes":             observacoes,
+        "medico_principal":        fin_row.get("medico_principal") or "Sem Registro",
+        "unidade_principal":       fin_row.get("unidade_principal") or "Sem Registro",
+    }
+
     financeiro = {
-        "total_gasto":        round(total_gasto, 2),
-        "ticket_medio":       round(ticket_medio, 2),
-        "convenio_principal": fin_row.get("convenio_principal") or "Particular",
-        "valor_particular":   round(val_part, 2),
-        "valor_convenio":     round(val_conv, 2),
-        "percent_particular": round(pct_part, 2),
+        "total_gasto":              round(total_gasto, 2),
+        "ticket_medio":             round(ticket_medio, 2),
+        "convenio_principal":       fin_row.get("convenio_principal") or "Particular",
+        "valor_particular":         round(val_part, 2),
+        "valor_convenio":           round(val_conv, 2),
+        "percent_particular":       round(pct_part, 2),
+        "taxa_conversao_orcamento": round(taxa_orc, 2),
     }
 
     # --- Classificação (VIP tem prioridade) ---
@@ -291,11 +347,12 @@ def get_paciente_perfil(pac_reg: int) -> dict:
         categoria = "Novo"
 
     classificacao = {
-        "categoria":       categoria,
-        "total_visitas":   total_visitas,
-        "primeira_visita": primeira_visita,
-        "ultima_visita":   ultima_visita,
-        "dias_sem_visita": dias_sem_visita,
+        "categoria":               categoria,
+        "total_visitas":           total_visitas,
+        "primeira_visita":         primeira_visita,
+        "ultima_visita":           ultima_visita,
+        "dias_sem_visita":         dias_sem_visita,
+        "frequencia_visitas_dias": frequencia_dias,
     }
 
     # --- Histórico de visitas ---

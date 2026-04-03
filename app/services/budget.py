@@ -182,10 +182,23 @@ def get_orcamentos_pacientes(cursor, start_date: str, end_date: str) -> List[Orc
     unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
 
     query = f"""
+    WITH PatStats AS (
+        SELECT 
+            O.osm_pac, 
+            COUNT(DISTINCT O.osm_num) as total_visitas,
+            SUM(S.smm_vlr) as total_gasto
+        FROM OSM O WITH(NOLOCK)
+        LEFT JOIN SMM S WITH(NOLOCK) ON S.smm_osm = O.osm_num AND S.smm_osm_serie = O.osm_serie
+        WHERE O.osm_pac IN (
+            SELECT ORP_PAC_REG FROM ORP WHERE ORP_DTHR {date_filter}
+        )
+        GROUP BY O.osm_pac
+    )
     SELECT
         ORP.ORP_NUM                   AS orcamento_num,
         ORP.ORP_DTHR                  AS data_cadastro,
         ORP.ORP_STATUS                AS status,
+        ORP.ORP_OSM_NUM               AS osm_num,
         ORP.ORP_USR_LOGIN_LANC        AS usuario,
         STR.STR_NOME                  AS unidade,
         PAC.PAC_REG                   AS pac_reg,
@@ -193,11 +206,19 @@ def get_orcamentos_pacientes(cursor, start_date: str, end_date: str) -> List[Orc
         PAC.PAC_FONE                  AS pac_fone,
         PAC.PAC_NASC                  AS pac_nasc,
         PAC.PAC_SEXO                  AS pac_sexo,
-        SUM(IOP.IOP_VALOR)            AS valor_total
+        MAX(CAST(ORP.ORP_OBS AS VARCHAR(MAX))) AS observacao,
+        SUM(IOP.IOP_VALOR)            AS valor_total,
+        CASE 
+            WHEN COALESCE(PS.total_gasto, 0) >= 1000 THEN 'VIP'
+            WHEN COALESCE(PS.total_visitas, 0) >= 3 THEN 'Fiel'
+            WHEN COALESCE(PS.total_visitas, 0) > 0 THEN 'Recorrente'
+            ELSE 'Novo'
+        END AS pac_categoria
     FROM ORP WITH(NOLOCK)
     INNER JOIN IOP WITH(NOLOCK) ON IOP.IOP_ORP_NUM  = ORP.ORP_NUM
     INNER JOIN STR WITH(NOLOCK) ON STR.STR_COD       = ORP.ORP_STR_SOLIC
     INNER JOIN PAC WITH(NOLOCK) ON PAC.PAC_REG        = ORP.ORP_PAC_REG
+    LEFT JOIN PatStats PS ON PS.osm_pac = PAC.PAC_REG
     WHERE ORP.ORP_DTHR {date_filter}
       AND ORP.ORP_STATUS IN ('A', 'P')
       AND STR.STR_STR_COD LIKE '{unit_prefix}'
@@ -206,13 +227,16 @@ def get_orcamentos_pacientes(cursor, start_date: str, end_date: str) -> List[Orc
         ORP.ORP_NUM,
         ORP.ORP_DTHR,
         ORP.ORP_STATUS,
+        ORP.ORP_OSM_NUM,
         ORP.ORP_USR_LOGIN_LANC,
         STR.STR_NOME,
         PAC.PAC_REG,
         PAC.PAC_NOME,
         PAC.PAC_FONE,
         PAC.PAC_NASC,
-        PAC.PAC_SEXO
+        PAC.PAC_SEXO,
+        PS.total_gasto,
+        PS.total_visitas
     ORDER BY ORP.ORP_DTHR DESC
     """
 
@@ -222,19 +246,24 @@ def get_orcamentos_pacientes(cursor, start_date: str, end_date: str) -> List[Orc
 
     result = []
     for r in rows:
+        osm_raw = r.get('osm_num')
         nasc = r.get('pac_nasc')
         result.append(OrcamentoItem(
             orcamento_num=int(r['orcamento_num']),
             data_cadastro=str(r['data_cadastro'])[:19] if r.get('data_cadastro') else '',
             status=str(r['status']).strip(),
+            convertido=osm_raw is not None,
+            osm_num=int(osm_raw) if osm_raw is not None else None,
             usuario=r.get('usuario'),
             unidade=str(r['unidade']).strip(),
             pac_reg=int(r['pac_reg']),
             pac_nome=str(r['pac_nome']).strip(),
+            pac_categoria=r.get('pac_categoria'),
             pac_fone=str(r['pac_fone']).strip() if r.get('pac_fone') else None,
             pac_nasc=str(nasc)[:10] if nasc else None,
             pac_sexo=str(r['pac_sexo']).strip() if r.get('pac_sexo') else None,
             valor_total=round(float(r['valor_total'] or 0), 2),
+            observacao=r.get('observacao')
         ))
 
     return result
@@ -262,6 +291,7 @@ def get_orcamentos_por_unidade(cursor, unidade: str, start_date: str, end_date: 
         PAC.PAC_FONE                  AS pac_fone,
         PAC.PAC_NASC                  AS pac_nasc,
         PAC.PAC_SEXO                  AS pac_sexo,
+        MAX(CAST(ORP.ORP_OBS AS VARCHAR(MAX))) AS observacao,
         SUM(IOP.IOP_VALOR)            AS valor_total
     FROM ORP WITH(NOLOCK)
     INNER JOIN IOP WITH(NOLOCK) ON IOP.IOP_ORP_NUM  = ORP.ORP_NUM
@@ -309,6 +339,7 @@ def get_orcamentos_por_unidade(cursor, unidade: str, start_date: str, end_date: 
             pac_nasc=str(nasc)[:10] if nasc else None,
             pac_sexo=str(r['pac_sexo']).strip() if r.get('pac_sexo') else None,
             valor_total=round(float(r['valor_total'] or 0), 2),
+            observacao=r.get('observacao')
         ))
 
     return result

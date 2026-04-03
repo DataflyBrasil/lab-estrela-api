@@ -42,10 +42,10 @@ class QueryStrategicFinanceTool:
             conn = get_db_connection()
             cursor = conn.cursor(as_dict=True)
             
-            df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio = get_financial_analytics_data(cursor, start_date, end_date)
+            df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio, df_diario = get_financial_analytics_data(cursor, start_date, end_date)
             conn.close()
             
-            analytics_result = process_financial_analytics_python(df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio)
+            analytics_result = process_financial_analytics_python(df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio, df_diario)
             
             # Converter Pydantic model para dict se necessário
             if hasattr(analytics_result, 'dict'):

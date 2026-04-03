@@ -302,8 +302,30 @@ def get_financial_analytics_data(cursor, start_date, end_date):
     AND s.str_str_cod LIKE '{unit_prefix}'
     GROUP BY s.str_nome, c.cnv_nome, c.cnv_caixa_fatura
     """
+
+    # Novo: Faturamento diário consolidado para o gráfico de linhas
+    query_diario = f"""
+    SELECT
+        CAST(o.osm_dthr AS DATE) as data,
+        SUM(ISNULL(sm.smm_vlr, 0) + ISNULL(sm.SMM_AJUSTE_VLR, 0)) as valor
+    FROM OSM o
+    INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
+    INNER JOIN CNV c  ON o.osm_cnv = c.cnv_cod
+    INNER JOIN STR s  ON o.osm_str = s.str_cod
+    WHERE o.osm_dthr {date_filter}
+    AND (o.osm_status IS NULL OR o.osm_status <> 'C')
+    AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
+    AND c.cnv_caixa_fatura IN ('C', 'F')
+    AND s.str_str_cod LIKE '{unit_prefix}'
+    GROUP BY CAST(o.osm_dthr AS DATE)
+    ORDER BY 1
+    """
+
     cursor.execute(query_faturamento)
     df_all = pd.DataFrame(cursor.fetchall())
+
+    cursor.execute(query_diario)
+    df_diario = pd.DataFrame(cursor.fetchall())
 
     # Derivar os 4 subconjuntos originais sem queries adicionais
     if not df_all.empty:
@@ -350,9 +372,9 @@ def get_financial_analytics_data(cursor, start_date, end_date):
     cursor.execute(query_osm_count)
     total_atendimentos = cursor.fetchone()['total']
 
-    return df_gross, df_caixa, total_atendimentos, valor_fatura_convenio, df_units, df_units_convenio
+    return df_gross, df_caixa, total_atendimentos, valor_fatura_convenio, df_units, df_units_convenio, df_diario
 
-def process_financial_analytics_python(df_gross, df_caixa, total_atendimentos, valor_fatura_convenio=0.0, df_units=None, df_units_convenio=None):
+def process_financial_analytics_python(df_gross, df_caixa, total_atendimentos, valor_fatura_convenio=0.0, df_units=None, df_units_convenio=None, df_diario=None):
     """Processa métricas financeiras usando a lógica oficial."""
     
     # 1. Faturamento Total Bruto e Custo (CAIXA)
@@ -421,17 +443,28 @@ def process_financial_analytics_python(df_gross, df_caixa, total_atendimentos, v
     # Vamos usar Total Geral para Ticket Médio ficar realista sobre todo o volume
     ticket_medio = (total_geral / total_atendimentos) if total_atendimentos > 0 else 0.0
     
+    # 3. Faturamento Diário
+    faturamento_diario = []
+    if df_diario is not None and not df_diario.empty:
+        df_d = df_diario.copy()
+        # Garantir que não existam NaNs e que datas sejam strings ISO
+        df_d['valor'] = df_d['valor'].fillna(0.0).astype(float).round(2)
+        df_d['data'] = df_d['data'].apply(lambda x: x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') and x is not None else str(x) if x is not None else "")
+        df_d = df_d[df_d['data'] != ""]
+        faturamento_diario = df_d.to_dict(orient='records')
+
     return {
         "faturado_total": round(faturado_caixa, 2), # Mantendo nome legado para compatibilidade (mas é Caixa Bruto)
-        "faturado_convenio": round(valor_fatura_convenio, 2), # Novo
-        "total_geral": round(total_geral, 2), # Novo
+        "faturado_convenio": round(valor_fatura_convenio, 2), 
+        "total_geral": round(total_geral, 2),
         "custo_total": round(custo_caixa, 2),
         "recebido_total": round(recebido_total, 2),
         "glosa_total": round(glosa_total, 2),
         "percentual_glosa": round(percentual_glosa, 2),
         "ticket_medio_global": round(ticket_medio, 2),
         "faturamento_por_convenio": top_cnv_final,
-        "faturamento_por_unidade": units_final # Novo
+        "faturamento_por_unidade": units_final,
+        "faturamento_diario": faturamento_diario
     }
 
 def get_commercial_analytics_data(cursor, start_date, end_date):
@@ -482,22 +515,23 @@ def get_detailed_finance_data(cursor, start_date, end_date):
     """Busca dados para o relatorio financeiro detalhado."""
     
     date_filter = f"BETWEEN '{start_date} 00:00:00' AND '{end_date} 23:59:59'"
+    unit_prefix = "01%" if current_db_id.get() == "1" else "04%"
     
     # 1. Faturamento Particular (Bruto e Descontos)
-    # Reutilizando logica do MTE mas focando nos descontos tambem
     query_mte = f"""
     SELECT 
         SUM(ISNULL(m.mte_valor, 0)) as bruto,
         SUM(ISNULL(m.mte_desconto, 0)) as desconto
     FROM MTE m
     INNER JOIN OSM o ON m.mte_osm = o.osm_num AND m.mte_osm_serie = o.osm_serie
+    INNER JOIN STR s ON o.osm_str = s.str_cod
     WHERE o.osm_dthr {date_filter}
+    AND s.str_str_cod LIKE '{unit_prefix}'
     """
     cursor.execute(query_mte)
     mte_totals = cursor.fetchone()
     
-    # 2. Pagamentos (Tentativa de Classificacao via MCC)
-    # Vincular MTE -> MCC e olhar OBS
+    # 2. Pagamentos (Heuristica via MCC)
     query_payments = f"""
     SELECT 
         mc.MCC_OBS, 
@@ -505,38 +539,59 @@ def get_detailed_finance_data(cursor, start_date, end_date):
     FROM MTE m
     INNER JOIN OSM o ON m.mte_osm = o.osm_num AND m.mte_osm_serie = o.osm_serie
     INNER JOIN MCC mc ON m.mte_mcc_serie_caixa = mc.MCC_SERIE AND m.mte_mcc_lote_caixa = mc.MCC_LOTE
+    INNER JOIN STR s ON o.osm_str = s.str_cod
     WHERE o.osm_dthr {date_filter}
+    AND s.str_str_cod LIKE '{unit_prefix}'
     GROUP BY mc.MCC_OBS
     """
     cursor.execute(query_payments)
     df_payments = pd.DataFrame(cursor.fetchall())
     
     # 3. Pacientes (Novos vs Recorrentes)
-    # Novos: DREG dentro do periodo
-    # Recorrentes: DREG antes do periodo
+    # Reforçando data_filter sem horas para a comparação do pac_dreg
+    day_filter = f"BETWEEN '{start_date}' AND '{end_date}'"
+    
     query_pac = f"""
     SELECT 
         CASE 
-            WHEN p.pac_dreg {date_filter} THEN 'NOVO'
+            WHEN CAST(p.pac_dreg AS DATE) {day_filter} THEN 'NOVO'
             ELSE 'RECORRENTE'
         END as tipo_paciente,
         COUNT(DISTINCT p.pac_reg) as qtd
     FROM PAC p
     INNER JOIN OSM o ON p.pac_reg = o.osm_pac
+    INNER JOIN STR s ON o.osm_str = s.str_cod
     WHERE o.osm_dthr {date_filter}
-    AND (o.osm_status IS NULL OR o.osm_status <> 'C')
+      AND (o.osm_status IS NULL OR o.osm_status <> 'C')
+      AND s.str_str_cod LIKE '{unit_prefix}'
     GROUP BY 
         CASE 
-            WHEN p.pac_dreg {date_filter} THEN 'NOVO'
+            WHEN CAST(p.pac_dreg AS DATE) {day_filter} THEN 'NOVO'
             ELSE 'RECORRENTE'
         END
     """
     cursor.execute(query_pac)
     df_patients = pd.DataFrame(cursor.fetchall())
     
-    return mte_totals, df_payments, df_patients
+    # 4. Faturamento Convênio (Tipo F)
+    query_convenio_total = f"""
+    SELECT SUM(sm.smm_vlr) as total
+    FROM OSM o
+    INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
+    INNER JOIN CNV c ON o.osm_cnv = c.cnv_cod
+    INNER JOIN STR s ON o.osm_str = s.str_cod
+    WHERE o.osm_dthr {date_filter}
+    AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
+    AND c.cnv_caixa_fatura = 'F'
+    AND s.str_str_cod LIKE '{unit_prefix}'
+    """
+    cursor.execute(query_convenio_total)
+    res_conv = cursor.fetchone()
+    valor_convenio_faturado = float(res_conv['total'] or 0)
 
-def process_detailed_finance_python(mte_totals, df_payments, df_patients):
+    return mte_totals, df_payments, df_patients, valor_convenio_faturado
+
+def process_detailed_finance_python(mte_totals, df_payments, df_patients, valor_convenio_faturado=0.0):
     """Processa os dados brutos para o formato do relatorio."""
     
     # 1. Totais MTE
@@ -573,7 +628,14 @@ def process_detailed_finance_python(mte_totals, df_payments, df_patients):
             else:
                 pacientes['recorrentes'] = qtd
     pacientes['total'] = pacientes['novos'] + pacientes['recorrentes']
-    
+
+    # 4. Injetar Convênio nos Pagamentos para tirar o peso de "OUTROS"
+    if valor_convenio_faturado > 0:
+        # Se o sistema rotula 'OUTROS' como Convênio/Faturamento, vamos separar ou turbinar.
+        # Aqui vamos garantir que 'OUTROS' seja apenas o que sobrou de fato do CAIXA (MTE).
+        # Mas para o usuário, "Faturamento / Convênio" é uma categoria mestre.
+        pagamento_map['CONVENIO'] = valor_convenio_faturado
+
     return {
         'faturamento': {
             'bruto': bruto,

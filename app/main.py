@@ -23,7 +23,9 @@ from .models.base import (
     PacienteVisita, PacienteExame, PacienteOrcamento,
     ModularComparisonResponse, DiscoveryResponse,
     UnitComparativeResponse, RankingComparisonResponse, ProjectionResponse,
-    ExamDetailResponse, ExamDetailData, ExamDetailSummary, ExamInsightItem, ExamPatientItem
+    ExamDetailResponse, ExamDetailData, ExamDetailSummary, ExamInsightItem, ExamPatientItem,
+    PacientePeriodoResponse, PacientePeriodoItem,
+    MonthlyExecutionResponse
 )
 from .services.analytics import (
     get_unit_revenue_data, 
@@ -47,6 +49,7 @@ from .services.comparison import (
     get_unit_comparative_dashboard, get_ranking_comparison,
     get_performance_projections
 )
+from .services.metas import get_monthly_execution
 from .ai.api.router import router as ai_router
 
 app = FastAPI(title="Laboratório Estrela API", version="2.0.0")
@@ -54,8 +57,8 @@ app = FastAPI(title="Laboratório Estrela API", version="2.0.0")
 # Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "*"],
-    # allow_origins=["https://labestrelabi.com.br", "https://app.labestrelabi.com.br"],
+    # allow_origins=["http://localhost:3000", "http://localhost:3001", "*"],
+    allow_origins=["https://labestrelabi.com.br", "https://app.labestrelabi.com.br"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -138,6 +141,41 @@ def list_units():
         return UnitsResponse(success=True, data=units)
     except Exception as e:
         return UnitsResponse(success=False, error=str(e))
+
+@app.get("/metas/execucao", response_model=MonthlyExecutionResponse, tags=["Management"])
+def metas_execucao(
+    unidade: Optional[str] = Query(None, description="Nome da unidade específica")
+):
+    """
+    Retorna a execução real mensal da unidade (faturamento, pacientes) no ano atual.
+    """
+    try:
+        db_id = current_db_id.get()
+        # Auto-switch de região baseado no nome da unidade (se estiver no contexto errado)
+        if unidade and "PAULO AFONSO" in unidade.upper():
+            db_id = "2"
+            current_db_id.set("2")
+            print(f"Auto-switch: Detectado Paulo Afonso na unidade '{unidade}'. Mudando para DB 2.")
+        
+        # Caching
+        cache_key = f"metas_execucao_{db_id}_{unidade}"
+        if cache_key in analytics_cache:
+            return MonthlyExecutionResponse(success=True, data=analytics_cache[cache_key])
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        
+        execution = get_monthly_execution(cursor, unidade)
+        
+        release_connection(conn)
+        
+        # Guardar no cache
+        analytics_cache[cache_key] = execution
+        
+        return MonthlyExecutionResponse(success=True, data=execution)
+    except Exception as e:
+        print(f"Erro em /metas/execucao: {e}")
+        return MonthlyExecutionResponse(success=False, error=str(e))
 
 @app.get("/unidades/faturamento", response_model=UnitRevenueResponse, tags=["Financeiro"])
 def get_unit_revenue(
@@ -279,22 +317,17 @@ def get_financial_strategic_analytics(
         if not end_date:
             end_date = datetime.now().date()
 
-        cache_key = f"financeiro_estrategico_{current_db_id.get()}_{start_date}_{end_date}"
-        if cache_key in analytics_cache:
-            return analytics_cache[cache_key]
-
         conn = get_db_connection()
         cursor = conn.cursor(as_dict=True)
 
         # Busca dados financeiros
-        df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio = get_financial_analytics_data(cursor, start_date, end_date)
+        df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio, df_diario = get_financial_analytics_data(cursor, start_date, end_date)
         release_connection(conn)
 
         # Processa via Python
-        analytics_result = process_financial_analytics_python(df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio)
+        analytics_result = process_financial_analytics_python(df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio, df_diario)
 
         response = FinancialResponse(success=True, data=analytics_result)
-        analytics_cache[cache_key] = response
         return response
 
     except Exception as e:
@@ -341,11 +374,11 @@ def get_detailed_finance_analytics(
             end_date = datetime.now().date()
 
         # Busca dados detalhados
-        mte_totals, df_payments, df_patients = get_detailed_finance_data(cursor, start_date, end_date)
+        mte_totals, df_payments, df_patients, valor_convenio_faturado = get_detailed_finance_data(cursor, start_date, end_date)
         release_connection(conn)
 
         # Processa via Python
-        analytics_result = process_detailed_finance_python(mte_totals, df_payments, df_patients)
+        analytics_result = process_detailed_finance_python(mte_totals, df_payments, df_patients, valor_convenio_faturado)
         
         return DetailedResponse(success=True, data=analytics_result)
 
@@ -423,8 +456,9 @@ def get_budgets(start_date: Optional[str] = Query(None, description="Data inicia
         print(f"Erro no endpoint de orçamentos: {e}")
         return {"success": False, "error": str(e)}
 
-@app.get("/orcamentos", response_model=OrcamentosResponse, tags=["Comercial"])
-def get_orcamentos_pacientes(
+@app.get("/orcamentos/pacientes", tags=["Comercial"])
+@app.get("/orcamentos-pacientes", tags=["Comercial"])
+def get_orcamentos_pacientes_list(
     start_date: Optional[date] = Query(None, description="Data inicial (YYYY-MM-DD)"),
     end_date: Optional[date] = Query(None, description="Data final (YYYY-MM-DD)"),
 ):
@@ -444,11 +478,16 @@ def get_orcamentos_pacientes(
         items = _get_orcamentos(cursor, str(start_date), str(end_date))
         release_connection(conn)
 
-        return OrcamentosResponse(success=True, data=items)
+        # Usando dicionário direto para evitar problemas de validação de modelo no 404
+        return {
+            "success": True,
+            "total": len(items),
+            "data": items
+        }
 
     except Exception as e:
-        print(f"Erro no endpoint /orcamentos: {e}")
-        return OrcamentosResponse(success=False, error=str(e))
+        print(f"Erro no endpoint /orcamentos/pacientes: {e}")
+        return {"success": False, "total": 0, "error": str(e)}
 
 
 @app.get("/orcamentos/unidade", response_model=OrcamentoUnidadeResponse, tags=["Comercial"])
@@ -697,6 +736,48 @@ def get_perfil_paciente(pac_reg: int):
         return PacientePerfilResponse(success=True, data=data)
     except Exception as e:
         return PacientePerfilResponse(success=False, error=str(e))
+
+
+@app.get("/pacientes/periodo", response_model=PacientePeriodoResponse, tags=["Pacientes"])
+def get_pacientes_periodo(
+    start_date: Optional[date] = Query(None, description="Data inicial (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="Data final (YYYY-MM-DD)"),
+    full_scan: bool = Query(False, description="Se True, ignora as datas e busca todos os pacientes"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """
+    Retorna listagem estratégica de pacientes (LTV, Categoria) filtrada por período ou varredura completa.
+    """
+    try:
+        db_id = current_db_id.get()
+        cache_key = f"paciente_periodo_{db_id}_{start_date}_{end_date}_{full_scan}_{page}_{limit}"
+        if cache_key in analytics_cache:
+            return analytics_cache[cache_key]
+
+        from .services.patient_profile import get_pacientes_estrategico
+        result = get_pacientes_estrategico(
+            str(start_date) if start_date else None, 
+            str(end_date) if end_date else None, 
+            page, 
+            limit, 
+            full_scan
+        )
+        
+        items = [PacientePeriodoItem(**i) for i in result["items"]]
+        
+        response = PacientePeriodoResponse(
+            success=True,
+            total=result["total"],
+            page=result["page"],
+            limit=result["limit"],
+            data=items,
+        )
+        
+        analytics_cache[cache_key] = response
+        return response
+    except Exception as e:
+        return PacientePeriodoResponse(success=False, error=str(e))
 
 
 # --- Modular Comparison / BI v2 ---

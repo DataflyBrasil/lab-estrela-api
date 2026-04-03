@@ -217,17 +217,22 @@ class OrcamentoItem(BaseModel):
     orcamento_num: int
     data_cadastro: str
     status: str
+    convertido: bool
+    osm_num: Optional[int] = None
     usuario: Optional[str] = None
     unidade: str
     pac_reg: int
     pac_nome: str
+    pac_categoria: Optional[str] = None
     pac_fone: Optional[str] = None
     pac_nasc: Optional[str] = None
     pac_sexo: Optional[str] = None
     valor_total: float
+    observacao: Optional[str] = None
 
 class OrcamentosResponse(BaseModel):
     success: bool
+    total: int = 0
     data: Optional[List[OrcamentoItem]] = None
     error: Optional[str] = None
 
@@ -245,6 +250,7 @@ class OrcamentoUnidadeItem(BaseModel):
     pac_nasc: Optional[str] = None
     pac_sexo: Optional[str] = None
     valor_total: float
+    observacao: Optional[str] = None
 
 class OrcamentoUnidadeResponse(BaseModel):
     success: bool
@@ -404,6 +410,7 @@ class PacienteOrcamento(BaseModel):
     convertido: bool
     valor_total: float
     dias_em_aberto: Optional[int] = None
+    observacao: Optional[str] = None
 
 class PacientePerfilData(BaseModel):
     identidade: PacienteIdentidade
@@ -416,6 +423,22 @@ class PacientePerfilData(BaseModel):
 class PacientePerfilResponse(BaseModel):
     success: bool
     data: Optional[PacientePerfilData] = None
+    error: Optional[str] = None
+
+
+class PacientePeriodoItem(PacienteListItem):
+    total_gasto_historico: float
+    ticket_medio_historico: float
+    categoria: str
+    unidade_frequente: Optional[str] = None
+
+
+class PacientePeriodoResponse(BaseModel):
+    success: bool
+    total: int = 0
+    page: int = 1
+    limit: int = 20
+    data: Optional[List[PacientePeriodoItem]] = None
     error: Optional[str] = None
 
 
@@ -564,4 +587,15 @@ class ExamDetailData(BaseModel):
 class ExamDetailResponse(BaseModel):
     success: bool
     data: Optional[ExamDetailData] = None
+    error: Optional[str] = None
+
+class MonthlyExecutionItem(BaseModel):
+    month_year: str
+    revenue: float
+    patients: int
+    ticket_avg: float
+
+class MonthlyExecutionResponse(BaseModel):
+    success: bool
+    data: Optional[List[MonthlyExecutionItem]] = None
     error: Optional[str] = None

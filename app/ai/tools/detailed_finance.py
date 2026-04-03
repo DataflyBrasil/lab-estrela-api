@@ -42,10 +42,10 @@ class QueryDetailedFinanceTool:
             conn = get_db_connection()
             cursor = conn.cursor(as_dict=True)
             
-            mte_totals, df_payments, df_patients = get_detailed_finance_data(cursor, start_date, end_date)
+            mte_totals, df_payments, df_patients, valor_convenio_faturado = get_detailed_finance_data(cursor, start_date, end_date)
             conn.close()
             
-            analytics_result = process_detailed_finance_python(mte_totals, df_payments, df_patients)
+            analytics_result = process_detailed_finance_python(mte_totals, df_payments, df_patients, valor_convenio_faturado)
             
             # Converter Pydantic model para dict se necessário
             if hasattr(analytics_result, 'dict'):

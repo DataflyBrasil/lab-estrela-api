@@ -33,29 +33,24 @@ os.environ['TDSVER'] = '7.0'
 
 # ---------------------------------------------------------------------------
 # Connection pool simples por thread e por banco.
-# Cada thread de worker do uvicorn/gunicorn reutiliza sua própria conexão,
-# evitando o overhead de TCP handshake + autenticação a cada request.
+# Cada thread de worker reutiliza sua própria conexão, evitando o overhead
+# de TCP handshake + autenticação a cada request.
+# A verificação de saúde é LAZY: só reconecta após uma falha real, não antes
+# de cada request. Isso elimina um roundtrip extra ao SQL Server por requisição.
 # ---------------------------------------------------------------------------
 _local = threading.local()
-
-def _is_connection_alive(conn) -> bool:
-    """Verifica se a conexão ainda está ativa sem levantar exceção ao caller."""
-    try:
-        conn.cursor().execute("SELECT 1")
-        return True
-    except Exception:
-        return False
 
 def get_db_connection():
     """
     Retorna uma conexão reutilizável por thread para o banco selecionado.
-    Cria uma nova conexão apenas na primeira chamada da thread ou após falha.
+    Cria uma nova conexão apenas na primeira chamada da thread ou após falha
+    detectada em release_connection (lazy reconnect — sem SELECT 1 proativo).
     """
     db_id = current_db_id.get()
     attr = f"conn_{db_id}"
     conn = getattr(_local, attr, None)
 
-    if conn is None or not _is_connection_alive(conn):
+    if conn is None:
         config = DB_CONFIGS.get(db_id, DB_CONFIGS["1"])
         conn = pymssql.connect(**config)
         setattr(_local, attr, conn)
@@ -66,11 +61,13 @@ def release_connection(conn):
     """
     Em vez de fechar a conexão após cada request, apenas faz rollback
     para limpar qualquer transação pendente e mantém o socket aberto.
+    Se o rollback falhar, a conexão é descartada e será recriada na próxima
+    chamada de get_db_connection() (reconexão lazy).
     """
     try:
         conn.rollback()
     except Exception:
-        # Conexão corrompida — será recriada no próximo get_db_connection()
+        # Conexão corrompida — marca como None para recriar na próxima chamada
         db_id = current_db_id.get()
         attr = f"conn_{db_id}"
         setattr(_local, attr, None)

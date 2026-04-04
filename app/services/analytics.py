@@ -297,6 +297,7 @@ def get_financial_analytics_data(cursor, start_date, end_date):
     INNER JOIN CNV c  ON o.osm_cnv = c.cnv_cod
     INNER JOIN STR s  ON o.osm_str = s.str_cod
     WHERE o.osm_dthr {date_filter}
+    AND (o.osm_status IS NULL OR o.osm_status <> 'C')
     AND (sm.smm_sfat IS NULL OR sm.smm_sfat <> 'C')
     AND c.cnv_caixa_fatura IN ('C', 'F')
     AND s.str_str_cod LIKE '{unit_prefix}'
@@ -307,7 +308,7 @@ def get_financial_analytics_data(cursor, start_date, end_date):
     query_diario = f"""
     SELECT
         CAST(o.osm_dthr AS DATE) as data,
-        SUM(ISNULL(sm.smm_vlr, 0) + ISNULL(sm.SMM_AJUSTE_VLR, 0)) as valor
+        SUM(ISNULL(sm.smm_vlr, 0) + CASE WHEN c.cnv_caixa_fatura = 'C' THEN ISNULL(sm.SMM_AJUSTE_VLR, 0) ELSE 0 END) as valor
     FROM OSM o
     INNER JOIN SMM sm ON o.osm_num = sm.smm_osm AND o.osm_serie = sm.smm_osm_serie
     INNER JOIN CNV c  ON o.osm_cnv = c.cnv_cod

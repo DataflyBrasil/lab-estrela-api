@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-from app.database import get_db_connection
+from app.database import get_db_connection, release_connection
 from app.services.analytics import get_detailed_finance_data, process_detailed_finance_python
 import logging
 
@@ -23,46 +23,46 @@ class QueryDetailedFinanceTool:
         Returns:
             Dicionário com detalhamento financeiro
         """
+        conn = None
         try:
-            # Valores default
             if not start_date:
                 start_date = (datetime.now() - timedelta(days=30)).date()
             else:
                 start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-            
+
             if not end_date:
                 end_date = datetime.now().date()
             else:
                 end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-            
+
             logger.info(f"[QueryDetailedFinanceTool] Fetching detailed finance: {start_date} to {end_date}")
             print(f"📊 Consultando financeiro detalhado ({start_date} a {end_date})...")
-            
-            # Reutilizar lógica do endpoint
+
             conn = get_db_connection()
             cursor = conn.cursor(as_dict=True)
-            
             mte_totals, df_payments, df_patients, valor_convenio_faturado = get_detailed_finance_data(cursor, start_date, end_date)
-            conn.close()
-            
+            release_connection(conn)
+            conn = None
+
             analytics_result = process_detailed_finance_python(mte_totals, df_payments, df_patients, valor_convenio_faturado)
-            
-            # Converter Pydantic model para dict se necessário
+
             if hasattr(analytics_result, 'dict'):
                 result = analytics_result.dict()
             else:
                 result = analytics_result
-            
+
             print(f"✅ Detalhamento financeiro processado.")
-            
-            # Formatar para LLM
+
             return {
                 "period": {"start": str(start_date), "end": str(end_date)},
                 "details": result
             }
-            
+
         except Exception as e:
             logger.error(f"Error in QueryDetailedFinanceTool: {e}", exc_info=True)
             return {"error": str(e)}
+        finally:
+            if conn is not None:
+                release_connection(conn)
 
 query_detailed_finance_tool = QueryDetailedFinanceTool()

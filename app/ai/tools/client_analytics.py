@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-from app.database import get_db_connection
+from app.database import get_db_connection, release_connection
 from app.services.analytics import get_clients_analytics_data, process_clients_analytics_python
 import logging
 
@@ -23,13 +23,13 @@ class QueryClientAnalyticsTool:
         Returns:
             Dicionário com análise de clientes
         """
+        conn = None
         try:
-            # Valores default
             if not start_date:
                 start_date = (datetime.now() - timedelta(days=30)).date()
             else:
                 start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-            
+
             if not end_date:
                 end_date = datetime.now().date()
             else:
@@ -41,9 +41,9 @@ class QueryClientAnalyticsTool:
             # Reutilizar lógica do endpoint
             conn = get_db_connection()
             cursor = conn.cursor(as_dict=True)
-            
             df = get_clients_analytics_data(cursor, start_date, end_date)
-            conn.close()
+            release_connection(conn)
+            conn = None
             
             if df.empty:
                 return {
@@ -71,5 +71,8 @@ class QueryClientAnalyticsTool:
         except Exception as e:
             logger.error(f"Error in QueryClientAnalyticsTool: {e}", exc_info=True)
             return {"error": str(e)}
+        finally:
+            if conn is not None:
+                release_connection(conn)
 
 query_client_analytics_tool = QueryClientAnalyticsTool()

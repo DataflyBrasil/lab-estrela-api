@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-from app.database import get_db_connection
+from app.database import get_db_connection, release_connection
 from app.services.analytics import get_financial_analytics_data, process_financial_analytics_python
 import logging
 
@@ -23,46 +23,46 @@ class QueryStrategicFinanceTool:
         Returns:
             Dicionário com métricas financeiras estratégicas
         """
+        conn = None
         try:
-            # Valores default
             if not start_date:
                 start_date = (datetime.now() - timedelta(days=30)).date()
             else:
                 start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-            
+
             if not end_date:
                 end_date = datetime.now().date()
             else:
                 end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
-            
+
             logger.info(f"[QueryStrategicFinanceTool] Fetching strategic finance: {start_date} to {end_date}")
             print(f"💰 Consultando financeiro estratégico ({start_date} a {end_date})...")
-            
-            # Reutilizar lógica do endpoint
+
             conn = get_db_connection()
             cursor = conn.cursor(as_dict=True)
-            
             df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio, df_diario = get_financial_analytics_data(cursor, start_date, end_date)
-            conn.close()
-            
+            release_connection(conn)
+            conn = None
+
             analytics_result = process_financial_analytics_python(df_faturamento, df_caixa, total_atendimentos, valor_mte_final, valor_ipc_final, df_units_convenio, df_diario)
-            
-            # Converter Pydantic model para dict se necessário
+
             if hasattr(analytics_result, 'dict'):
                 result = analytics_result.dict()
             else:
                 result = analytics_result
-            
+
             print(f"✅ Dados financeiros processados. Faturamento bruto: R$ {result.get('faturamento_bruto', 0):,.2f}")
-            
-            # Formatar para LLM
+
             return {
                 "period": {"start": str(start_date), "end": str(end_date)},
                 "metrics": result
             }
-            
+
         except Exception as e:
             logger.error(f"Error in QueryStrategicFinanceTool: {e}", exc_info=True)
             return {"error": str(e)}
+        finally:
+            if conn is not None:
+                release_connection(conn)
 
 query_strategic_finance_tool = QueryStrategicFinanceTool()

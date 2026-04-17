@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-from app.database import get_db_connection
+from app.database import get_db_connection, release_connection
 from app.services.analytics import get_exam_sla_data, calculate_exam_sla_python
 import logging
 
@@ -27,6 +27,7 @@ class QueryExamSLATool:
         Returns:
             Dicionário com dados de SLA por unidade
         """
+        conn = None
         try:
             # Valores default
             if not start_date:
@@ -48,18 +49,17 @@ class QueryExamSLATool:
             
             conn = get_db_connection()
             cursor = conn.cursor(as_dict=True)
-            
+
             results = {}
-            
-            # Se 'all', buscar ambos os tipos
+
             if sla_type == 'all':
                 types_to_fetch = ['particular', 'convenio']
             else:
                 types_to_fetch = [sla_type]
-            
+
             for filter_type in types_to_fetch:
                 df = get_exam_sla_data(cursor, start_date, end_date, filter_type)
-                
+
                 if df.empty:
                     results[filter_type] = {
                         "message": f"Nenhum dado de SLA {filter_type} encontrado para o período",
@@ -80,8 +80,9 @@ class QueryExamSLATool:
                             } for r in analytics_result
                         ]
                     }
-            
-            conn.close()
+
+            release_connection(conn)
+            conn = None
             
             # Calcular totais gerais
             total_exams = 0
@@ -114,5 +115,8 @@ class QueryExamSLATool:
         except Exception as e:
             logger.error(f"Error in QueryExamSLATool: {e}", exc_info=True)
             return {"error": str(e)}
+        finally:
+            if conn is not None:
+                release_connection(conn)
 
 query_exam_sla_tool = QueryExamSLATool()

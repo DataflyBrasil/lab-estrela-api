@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from app.ai.orchestrator.client import ai_service
+from app.database import current_db_id
 import logging
 
 router = APIRouter()
@@ -24,7 +25,11 @@ async def chat_endpoint(request: ChatRequest):
     """
     Chat with the AI Analytics Engine.
     Supports conversation history via session_id.
+    The database used is determined by the x-database-id header (set by the middleware).
     """
+    active_db = current_db_id.get()
+    logger.info(f"[AI Chat] Iniciando com banco de dados ID: {active_db}")
+    print(f"🗄️  [AI Chat] Banco de dados ativo: {active_db} (definido pelo header x-database-id)")
 
     try:
         result = await ai_service.chat(

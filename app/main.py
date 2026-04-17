@@ -177,6 +177,37 @@ def metas_execucao(
         print(f"Erro em /metas/execucao: {e}")
         return MonthlyExecutionResponse(success=False, error=str(e))
 
+@app.get("/metas/execucao/diaria", response_model=MonthlyExecutionResponse, tags=["Management"])
+def metas_execucao_diaria(
+    unidade: Optional[str] = Query(None, description="Nome da unidade específica")
+):
+    """
+    Retorna a execução real diária da unidade no mês atual.
+    """
+    try:
+        db_id = current_db_id.get()
+        if unidade and "PAULO AFONSO" in unidade.upper():
+            db_id = "2"
+            current_db_id.set("2")
+
+        cache_key = f"metas_execucao_diaria_{db_id}_{unidade}"
+        if cache_key in analytics_cache:
+            return MonthlyExecutionResponse(success=True, data=analytics_cache[cache_key])
+
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        
+        from .services.metas import get_daily_execution
+        execution = get_daily_execution(cursor, unidade)
+        
+        release_connection(conn)
+        analytics_cache[cache_key] = execution
+        
+        return MonthlyExecutionResponse(success=True, data=execution)
+    except Exception as e:
+        print(f"Erro em /metas/execucao/diaria: {e}")
+        return MonthlyExecutionResponse(success=False, error=str(e))
+
 @app.get("/unidades/faturamento", response_model=UnitRevenueResponse, tags=["Financeiro"])
 def get_unit_revenue(
     start_date: Optional[date] = None,

@@ -590,7 +590,8 @@ class ExamDetailResponse(BaseModel):
     error: Optional[str] = None
 
 class MonthlyExecutionItem(BaseModel):
-    month_year: str
+    month_year: Optional[str] = None
+    date: Optional[str] = None
     revenue: float
     patients: int
     ticket_avg: float

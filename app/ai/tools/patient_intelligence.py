@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-from app.database import get_db_connection
+from app.database import get_db_connection, release_connection
 from app.services.patient import get_patient_data, process_patient_intelligence
 import logging
 
@@ -23,22 +23,21 @@ class QueryPatientIntelligenceTool:
         Returns:
             Dicionário com inteligência de pacientes
         """
+        conn = None
         try:
-            # Valores default (último ano para ter volume relevante)
             if not start_date:
                 start_date = (datetime.now() - timedelta(days=365)).date().strftime('%Y-%m-%d')
             if not end_date:
                 end_date = datetime.now().date().strftime('%Y-%m-%d')
-            
+
             logger.info(f"[QueryPatientIntelligenceTool] Fetching patient intelligence: {start_date} to {end_date}")
             print(f"🔬 Consultando inteligência de pacientes ({start_date} a {end_date})...")
-            
-            # Reutilizar lógica do endpoint
+
             conn = get_db_connection()
             cursor = conn.cursor()
-            
             df = get_patient_data(cursor, start_date, end_date)
-            conn.close()
+            release_connection(conn)
+            conn = None
             
             intelligence = process_patient_intelligence(df)
             
@@ -59,5 +58,8 @@ class QueryPatientIntelligenceTool:
         except Exception as e:
             logger.error(f"Error in QueryPatientIntelligenceTool: {e}", exc_info=True)
             return {"error": str(e)}
+        finally:
+            if conn is not None:
+                release_connection(conn)
 
 query_patient_intelligence_tool = QueryPatientIntelligenceTool()

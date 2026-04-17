@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-from app.database import get_db_connection
+from app.database import get_db_connection, release_connection
 from app.services.budget import get_budget_data, process_budget_metrics
 import logging
 
@@ -23,6 +23,7 @@ class QueryBudgetsTool:
         Returns:
             Dicionário com métricas de orçamentos
         """
+        conn = None
         try:
             # Valores default
             if not start_date:
@@ -36,9 +37,9 @@ class QueryBudgetsTool:
             # Reutilizar lógica do endpoint
             conn = get_db_connection()
             cursor = conn.cursor()
-            
             df_budgets = get_budget_data(cursor, start_date, end_date)
-            conn.close()
+            release_connection(conn)
+            conn = None
             
             if df_budgets.empty:
                 return {
@@ -90,5 +91,8 @@ class QueryBudgetsTool:
         except Exception as e:
             logger.error(f"Error in QueryBudgetsTool: {e}", exc_info=True)
             return {"error": str(e)}
+        finally:
+            if conn is not None:
+                release_connection(conn)
 
 query_budgets_tool = QueryBudgetsTool()

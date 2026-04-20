@@ -263,6 +263,7 @@ def get_orcamentos_pacientes(cursor, start_date: str, end_date: str) -> List[Orc
             pac_nasc=str(nasc)[:10] if nasc else None,
             pac_sexo=str(r['pac_sexo']).strip() if r.get('pac_sexo') else None,
             valor_total=round(float(r['valor_total'] or 0), 2),
+            total_visitas=int(r.get('total_visitas', 0)),
             observacao=r.get('observacao')
         ))
 

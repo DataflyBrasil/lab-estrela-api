@@ -228,6 +228,7 @@ class OrcamentoItem(BaseModel):
     pac_nasc: Optional[str] = None
     pac_sexo: Optional[str] = None
     valor_total: float
+    total_visitas: Optional[int] = 0
     observacao: Optional[str] = None
 
 class OrcamentosResponse(BaseModel):

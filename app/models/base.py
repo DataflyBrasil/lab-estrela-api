@@ -601,3 +601,202 @@ class MonthlyExecutionResponse(BaseModel):
     success: bool
     data: Optional[List[MonthlyExecutionItem]] = None
     error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Almoxarifado Models
+# ---------------------------------------------------------------------------
+
+class AlmoxarifadoKPIs(BaseModel):
+    total_itens: int = 0
+    total_ativos: int = 0
+    com_saldo: int = 0
+    sem_saldo: int = 0
+    curva_a: int = 0
+    controlados: int = 0
+    pereceveis: int = 0
+    valor_total_estoque: float = 0.0
+    abaixo_ressuprimento: int = 0
+    lotes_vencidos: int = 0
+    lotes_vencendo_30d: int = 0
+
+class AlmoxarifadoKPIsResponse(BaseModel):
+    success: bool
+    data: Optional[AlmoxarifadoKPIs] = None
+    sub_almoxarifados: List[str] = []
+    error: Optional[str] = None
+
+class StockItem(BaseModel):
+    cod: int
+    descricao: str
+    descricao_resumida: str
+    saldo_atual: float
+    estoque_maximo: float
+    ponto_ressuprimento: float
+    ponto_seguranca: float
+    preco_medio: float
+    preco_ult_entrada: float
+    sub_almox: str
+    unidade_medida: str
+    curva_abc: str
+    perecivel: str
+    controlado: str
+    criticidade: str
+    ultima_entrada: Optional[str] = None
+    ultima_saida: Optional[str] = None
+    consumo_medio: float
+    status_estoque: str  # ok | atencao | alerta | critico
+    valor_total: float
+
+class StockCatalogResponse(BaseModel):
+    success: bool
+    total: int = 0
+    page: int = 1
+    limit: int = 50
+    data: Optional[List[StockItem]] = None
+    error: Optional[str] = None
+
+class LotItem(BaseModel):
+    mat_cod: int
+    material: str
+    sub_almox: str
+    lote_num: str
+    data_entrada: Optional[str] = None
+    data_validade: Optional[str] = None
+    quantidade: float
+    saldo_lote: float
+    procedencia: str
+    nfe_num: Optional[int] = None
+    status: str
+    unidade: str
+
+class LotHistoryResponse(BaseModel):
+    success: bool
+    total: int = 0
+    page: int = 1
+    limit: int = 50
+    data: Optional[List[LotItem]] = None
+    error: Optional[str] = None
+
+class ExpiryAlertItem(BaseModel):
+    mat_cod: int
+    material: str
+    sub_almox: str
+    lote_num: str
+    data_validade: Optional[str] = None
+    saldo: float
+    unidade: str
+    nivel_alerta: str  # vencido | critico | alerta | atencao
+    dias_para_vencer: int
+
+class ExpiryAlertResumo(BaseModel):
+    vencidos: int = 0
+    criticos: int = 0
+    alertas: int = 0
+    atencao: int = 0
+
+class ExpiryAlertsResponse(BaseModel):
+    success: bool
+    total: int = 0
+    resumo: Optional[ExpiryAlertResumo] = None
+    data: Optional[List[ExpiryAlertItem]] = None
+    error: Optional[str] = None
+
+# --- Solicitações de Almoxarifado ---
+
+class SolicitacaoItem(BaseModel):
+    cod: int
+    descricao: str
+    qtde: float
+    unidade: str
+    pendente: float
+    prioridade: Optional[str] = None
+
+class SolicitacaoHeader(BaseModel):
+    serie: int
+    num: int
+    data: str
+    tipo: str
+    setor: str
+    solicitante: str
+    status: str
+    observacao: Optional[str] = None
+    itens: List[SolicitacaoItem] = []
+
+class SolicitacoesPendentesResponse(BaseModel):
+    success: bool
+    total: int = 0
+    data: Optional[List[SolicitacaoHeader]] = None
+    error: Optional[str] = None
+
+# --- Módulo Financeiro ---
+
+class ParcelaItem(BaseModel):
+    num_parcela: int = 0
+    vencimento: str = ""
+    valor: float = 0.0
+    status: str = "A"
+    data_pagamento: Optional[str] = None
+
+class CompromissoHeader(BaseModel):
+    serie: int
+    num: int
+    credor: str = "(Sem Credor)"  # nullable no banco
+    data_registro: str = ""
+    empresa: int = 0
+    valor_total: float = 0.0    # pode ser NULL se ipg_valor for NULL
+    total_parcelas: int = 1
+    status_consolidado: str = "Aberto"
+    observacao: Optional[str] = None
+    parcelas: List[ParcelaItem] = []
+
+class CompromissosResponse(BaseModel):
+    success: bool
+    total: int = 0
+    data: Optional[List[CompromissoHeader]] = None
+    error: Optional[str] = None
+
+class FluxoCaixaItem(BaseModel):
+    categoria: str
+    tipo: str  # RECEITA | DESPESA
+    valor: float
+    percentual: float = 0.0
+
+class FluxoCaixaResumo(BaseModel):
+    total_receitas: float
+    total_despesas: float
+    saldo_operacional: float
+    itens: List[FluxoCaixaItem] = []
+
+class FluxoCaixaResponse(BaseModel):
+    success: bool
+    data: Optional[FluxoCaixaResumo] = None
+    error: Optional[str] = None
+
+class FluxoDetalhadoItem(BaseModel):
+    categoria: str
+    valor: float
+    percentual: float = 0.0
+
+class FluxoDetalhadoSecao(BaseModel):
+    total: float
+    percentual_receita: float = 0.0
+    itens: List[FluxoDetalhadoItem] = []
+
+class FluxoCaixaDetalhadoResumo(BaseModel):
+    periodo_de: str
+    periodo_ate: str
+    receitas: FluxoDetalhadoSecao
+    despesas: FluxoDetalhadoSecao
+    resultado_operacional: float
+    resultado_percentual: float
+    # Campos extras para replicar o relatório legado
+    nao_operacional: Optional[FluxoDetalhadoSecao] = None
+    superavit_deficit: Optional[float] = None
+    saldo_inicial: Optional[float] = None
+    saldo_final: Optional[float] = None
+
+class FluxoCaixaDetalhadoResponse(BaseModel):
+    success: bool
+    data: Optional[FluxoCaixaDetalhadoResumo] = None
+    error: Optional[str] = None

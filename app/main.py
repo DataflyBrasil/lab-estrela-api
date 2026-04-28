@@ -25,7 +25,10 @@ from .models.base import (
     UnitComparativeResponse, RankingComparisonResponse, ProjectionResponse,
     ExamDetailResponse, ExamDetailData, ExamDetailSummary, ExamInsightItem, ExamPatientItem,
     PacientePeriodoResponse, PacientePeriodoItem,
-    MonthlyExecutionResponse
+    MonthlyExecutionResponse,
+    AlmoxarifadoKPIsResponse, StockCatalogResponse, LotHistoryResponse, ExpiryAlertsResponse,
+    SolicitacoesPendentesResponse,
+    CompromissosResponse, FluxoCaixaResponse, FluxoCaixaDetalhadoResponse
 )
 from .services.analytics import (
     get_unit_revenue_data, 
@@ -50,6 +53,11 @@ from .services.comparison import (
     get_performance_projections
 )
 from .services.metas import get_monthly_execution
+from .services.almoxarifado import (
+    get_stock_kpis, get_stock_catalog, get_lot_receiving_history, 
+    get_expiry_alerts, get_sub_almoxarifados, get_pending_requests
+)
+from .services.financeiro import get_accounts_payable, get_cash_flow, get_cash_flow_detailed
 from .ai.api.router import router as ai_router
 
 app = FastAPI(title="Laboratório Estrela API", version="2.0.0")
@@ -487,6 +495,7 @@ def get_budgets(start_date: Optional[str] = Query(None, description="Data inicia
         print(f"Erro no endpoint de orçamentos: {e}")
         return {"success": False, "error": str(e)}
 
+
 @app.get("/orcamentos/pacientes", tags=["Comercial"])
 @app.get("/orcamentos-pacientes", tags=["Comercial"])
 def get_orcamentos_pacientes_list(
@@ -811,6 +820,123 @@ def get_pacientes_periodo(
         return PacientePeriodoResponse(success=False, error=str(e))
 
 
+# ---------------------------------------------------------------------------
+# Almoxarifado (Inventory) Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/almoxarifado/kpis", response_model=AlmoxarifadoKPIsResponse, tags=["Almoxarifado"])
+def almoxarifado_kpis():
+    """
+    Retorna os KPIs gerais do estoque e a lista de sub-almoxarifados disponíveis.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        
+        kpis = get_stock_kpis(cursor)
+        subs = get_sub_almoxarifados(cursor)
+        
+        release_connection(conn)
+        return AlmoxarifadoKPIsResponse(success=True, data=kpis, sub_almoxarifados=subs)
+    except Exception as e:
+        print(f"Erro em /almoxarifado/kpis: {e}")
+        return AlmoxarifadoKPIsResponse(success=False, error=str(e))
+
+@app.get("/almoxarifado/estoque", response_model=StockCatalogResponse, tags=["Almoxarifado"])
+def almoxarifado_estoque(
+    sba_cod: Optional[str] = Query(None),
+    curva_abc: Optional[str] = Query(None),
+    com_saldo: bool = Query(False),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    sort_by: Optional[str] = Query(None),
+    sort_dir: str = Query("ASC", pattern="^(ASC|DESC|asc|desc)$"),
+    status_estoque: Optional[str] = Query(None, pattern="^(critico|alerta|atencao|ok)$"),
+):
+    """
+    Retorna o catálogo de materiais com saldos atuais e indicadores de ressuprimento.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+
+        result = get_stock_catalog(cursor, sba_cod, curva_abc, com_saldo, page, limit, sort_by, sort_dir, status_estoque)
+        
+        release_connection(conn)
+        return StockCatalogResponse(
+            success=True,
+            total=result['total'],
+            page=result['page'],
+            limit=result['limit'],
+            data=result['items']
+        )
+    except Exception as e:
+        print(f"Erro em /almoxarifado/estoque: {e}")
+        return StockCatalogResponse(success=False, error=str(e))
+
+@app.get("/almoxarifado/lotes", response_model=LotHistoryResponse, tags=["Almoxarifado"])
+def almoxarifado_lotes(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    sba_cod: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    sort_by: Optional[str] = Query(None),
+    sort_dir: str = Query("DESC", pattern="^(ASC|DESC|asc|desc)$")
+):
+    """
+    Retorna o histórico de recebimento de materiais por lote e NF-e.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        
+        result = get_lot_receiving_history(cursor, start_date, end_date, sba_cod, page, limit, sort_by, sort_dir)
+        
+        release_connection(conn)
+        return LotHistoryResponse(
+            success=True,
+            total=result['total'],
+            page=result['page'],
+            limit=result['limit'],
+            data=result['items']
+        )
+    except Exception as e:
+        print(f"Erro em /almoxarifado/lotes: {e}")
+        return LotHistoryResponse(success=False, error=str(e))
+
+@app.get("/almoxarifado/alertas", response_model=ExpiryAlertsResponse, tags=["Almoxarifado"])
+def almoxarifado_alertas(
+    days_ahead: int = Query(90, ge=7),
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
+    sort_by: Optional[str] = Query(None),
+    sort_dir: str = Query("ASC", pattern="^(ASC|DESC|asc|desc)$")
+):
+    """
+    Retorna alertas de lotes vencidos ou próximos do vencimento.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        
+        result = get_expiry_alerts(cursor, days_ahead, page, limit, sort_by, sort_dir)
+        
+        release_connection(conn)
+        return ExpiryAlertsResponse(
+            success=True,
+            total=result['total'],
+            resumo=result['resumo'],
+            data=result['items'],
+            page=result.get('page', page),
+            limit=result.get('limit', limit)
+        )
+    except Exception as e:
+        print(f"Erro em /almoxarifado/alertas: {e}")
+        return ExpiryAlertsResponse(success=False, error=str(e))
+
+
+
 # --- Modular Comparison / BI v2 ---
 
 @app.get("/comparativo/metadados", response_model=DiscoveryResponse, tags=["Comparativo"])
@@ -1001,3 +1127,183 @@ def get_detalhes_exame(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/almoxarifado/solicitacoes/pendentes", response_model=SolicitacoesPendentesResponse, tags=["Almoxarifado"])
+def almoxarifado_solicitacoes_pendentes(data_de: Optional[str] = None, data_ate: Optional[str] = None):
+    """
+    Lista solicitações de materiais do almoxarifado no período informado (padrão: mês atual).
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        solicitacoes = get_pending_requests(cursor, data_de, data_ate)
+        release_connection(conn)
+        return SolicitacoesPendentesResponse(
+            success=True,
+            total=len(solicitacoes),
+            data=solicitacoes
+        )
+    except Exception as e:
+        print(f"Erro em /almoxarifado/solicitacoes/pendentes: {e}")
+        return SolicitacoesPendentesResponse(success=False, error=str(e))
+
+@app.get("/financeiro/compromissos", response_model=CompromissosResponse, tags=["Financeiro"])
+def financeiro_compromissos(data_de: Optional[str] = None, data_ate: Optional[str] = None):
+    """
+    Lista compromissos a pagar com parcelas em aberto.
+    Filtro opcional por período de registro: data_de e data_ate no formato YYYY-MM-DD.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        data = get_accounts_payable(cursor, data_de=data_de, data_ate=data_ate)
+        release_connection(conn)
+        return CompromissosResponse(success=True, total=len(data), data=data)
+    except Exception as e:
+        print(f"Erro em /financeiro/compromissos: {e}")
+        return CompromissosResponse(success=False, error=str(e))
+
+@app.get("/financeiro/fluxo-caixa", response_model=FluxoCaixaResponse, tags=["Financeiro"])
+def financeiro_fluxo_caixa(days: int = 30):
+    """
+    Retorna o resumo do fluxo de caixa categorizado.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        data = get_cash_flow(cursor, days)
+        release_connection(conn)
+        return FluxoCaixaResponse(success=True, data=data)
+    except Exception as e:
+        print(f"Erro em /financeiro/fluxo-caixa: {e}")
+        return FluxoCaixaResponse(success=False, error=str(e))
+
+@app.get("/financeiro/cfo-mcc-debug", tags=["Financeiro"])
+def financeiro_cfo_mcc_debug(data_de: str, data_ate: str):
+    """Diagnóstico: CFO completo + MCC agrupado por CFO para o período."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+
+        cursor.execute("""
+            SELECT RTRIM(cfo_cod) AS cod, RTRIM(ISNULL(cfo_nome,'')) AS nome,
+                   RTRIM(ISNULL(cfo_tipo,'')) AS tipo,
+                   RTRIM(ISNULL(cfo_cfo_cod,'')) AS pai,
+                   cfo_nivel, RTRIM(ISNULL(CFO_OPERAC,'')) AS operac,
+                   RTRIM(CFO_STATUS) AS status
+            FROM cfo ORDER BY cfo_cod
+        """)
+        cfo_all = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT
+                RTRIM(ISNULL(P.cfo_nome, C.cfo_nome))   AS grupo,
+                RTRIM(C.cfo_nome)                         AS categoria,
+                RTRIM(ISNULL(C.cfo_tipo,''))              AS tipo,
+                RTRIM(ISNULL(C.cfo_cfo_cod,''))           AS cfo_pai,
+                SUM(ISNULL(CAST(M.MCC_CRE AS FLOAT),0))  AS total_cre,
+                SUM(ISNULL(CAST(M.MCC_DEB AS FLOAT),0))  AS total_deb,
+                COUNT(*)                                   AS qtd
+            FROM MCC M WITH(NOLOCK)
+            INNER JOIN cfo C WITH(NOLOCK) ON RTRIM(M.MCC_CFO_COD) = RTRIM(C.cfo_cod)
+            LEFT  JOIN cfo P WITH(NOLOCK) ON RTRIM(C.cfo_cfo_cod) = RTRIM(P.cfo_cod)
+            WHERE CAST(M.MCC_DT AS DATE) >= '{de}'
+              AND CAST(M.MCC_DT AS DATE) <= '{ate}'
+              AND M.MCC_CONCILIA = 'S'
+            GROUP BY ISNULL(P.cfo_nome,C.cfo_nome), C.cfo_nome,
+                     ISNULL(C.cfo_tipo,''), ISNULL(C.cfo_cfo_cod,'')
+            HAVING SUM(ISNULL(CAST(M.MCC_CRE AS FLOAT),0)) > 0
+                OR SUM(ISNULL(CAST(M.MCC_DEB AS FLOAT),0)) > 0
+            ORDER BY tipo, total_cre DESC, total_deb DESC
+        """.format(de=data_de, ate=data_ate))
+        mcc_cfo = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT SUM(ISNULL(CAST(MCC_CRE AS FLOAT),0)) AS cre_total,
+                   SUM(ISNULL(CAST(MCC_DEB AS FLOAT),0)) AS deb_total
+            FROM MCC WITH(NOLOCK)
+            WHERE CAST(MCC_DT AS DATE) >= '{de}'
+              AND CAST(MCC_DT AS DATE) <= '{ate}'
+              AND MCC_CONCILIA = 'S'
+        """.format(de=data_de, ate=data_ate))
+        totais = cursor.fetchall()
+
+        release_connection(conn)
+        return {"success": True, "cfo_table": cfo_all,
+                "mcc_por_cfo": mcc_cfo, "totais_conciliados": totais}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/financeiro/mcc-schema", tags=["Financeiro"])
+def financeiro_mcc_schema():
+    """Retorna colunas da tabela MCC e amostra de registros para diagnóstico."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        cursor.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'MCC'
+            ORDER BY ORDINAL_POSITION
+        """)
+        cols = cursor.fetchall()
+        cursor.execute("SELECT TOP 3 * FROM MCC WITH(NOLOCK) WHERE MCC_CRE > 0 ORDER BY MCC_DT DESC")
+        sample = cursor.fetchall()
+        cursor.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = 'CFO' ORDER BY ORDINAL_POSITION
+        """)
+        cfo_cols = cursor.fetchall()
+        cursor.execute("SELECT TOP 10 * FROM CFO WITH(NOLOCK)")
+        cfo_sample = cursor.fetchall()
+        release_connection(conn)
+        return {"success": True, "mcc_columns": cols, "mcc_sample": sample,
+                "cfo_columns": cfo_cols, "cfo_sample": cfo_sample}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/financeiro/mcc-obs-debug", tags=["Financeiro"])
+def financeiro_mcc_obs_debug(data_de: str, data_ate: str):
+    """
+    Diagnóstico: retorna os valores brutos de MCC_OBS com créditos no período.
+    Útil para entender o que está caindo em 'Outros' na categorização de receitas.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        query = """
+            SELECT
+                ISNULL(LTRIM(RTRIM(MCC_OBS)), '(NULL)') AS obs,
+                SUM(ISNULL(CAST(MCC_CRE AS FLOAT), 0))  AS total,
+                COUNT(*)                                  AS qtd
+            FROM MCC WITH(NOLOCK)
+            WHERE CAST(MCC_DT AS DATE) >= '{de}'
+              AND CAST(MCC_DT AS DATE) <= '{ate}'
+              AND ISNULL(CAST(MCC_CRE AS FLOAT), 0) > 0
+              AND ISNULL(LTRIM(RTRIM(MCC_OBS)), '') NOT LIKE 'Pag. a%'
+            GROUP BY ISNULL(LTRIM(RTRIM(MCC_OBS)), '(NULL)')
+            ORDER BY total DESC
+        """.format(de=data_de, ate=data_ate)
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        release_connection(conn)
+        return {"success": True, "data": rows, "total_linhas": len(rows)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/financeiro/fluxo-caixa-detalhado", response_model=FluxoCaixaDetalhadoResponse, tags=["Financeiro"])
+def financeiro_fluxo_caixa_detalhado(data_de: str, data_ate: str):
+    """
+    Retorna o detalhamento completo do fluxo de caixa para um período.
+    Receitas por forma de pagamento (Espécie, PIX, Cartão) e despesas por categoria CFO.
+    Parâmetros: data_de e data_ate no formato YYYY-MM-DD.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(as_dict=True)
+        data = get_cash_flow_detailed(cursor, data_de, data_ate)
+        release_connection(conn)
+        return FluxoCaixaDetalhadoResponse(success=True, data=data)
+    except Exception as e:
+        print(f"Erro em /financeiro/fluxo-caixa-detalhado: {e}")
+        return FluxoCaixaDetalhadoResponse(success=False, error=str(e))
+
